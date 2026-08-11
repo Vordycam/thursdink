@@ -1,13 +1,14 @@
 /* Service worker: precache the app shell so everything works offline.
    Strategy: stale-while-revalidate — serve from cache instantly (offline-safe),
    refresh the cache in the background so the next load picks up updates. */
-var CACHE = 'pbr-v3';
+var CACHE = 'pbr-v4';
 var ASSETS = [
   './',
   './index.html',
   './styles.css',
   './js/storage.js',
   './js/engine.js',
+  './js/pdf.js',
   './js/app.js',
   './manifest.webmanifest',
   './logo.jpg',

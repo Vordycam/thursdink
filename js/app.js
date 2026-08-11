@@ -298,11 +298,13 @@
       '<p class="muted small-note">Tap a player for their trend and history.</p></div>' +
       '<div class="card"><h2>Sessions (' + DB.sessions.length + ')</h2>' +
       (sessionsHtml || '<p class="muted">No sessions yet.</p>') + '</div>' +
-      '<div class="card"><h2>Backup</h2>' +
-      '<p class="muted small-note">All data lives on this device. Export a backup file now and then.</p>' +
+      '<div class="card"><h2>Export &amp; backup</h2>' +
+      '<p class="muted small-note">The PDF is a readable report you can share or print. ' +
+      'The JSON backup is for restoring or moving your data to another device.</p>' +
       '<div class="setup-actions">' +
-      '<button class="btn" data-action="export-data">Export data</button>' +
-      '<button class="btn" data-action="import-data">Import data</button>' +
+      '<button class="btn primary" data-action="export-pdf">Export report (PDF)</button>' +
+      '<button class="btn" data-action="export-data">Export backup (JSON)</button>' +
+      '<button class="btn" data-action="import-data">Import backup</button>' +
       '<input type="file" id="import-file" accept=".json,application/json" hidden>' +
       '</div></div>';
   }
@@ -725,6 +727,7 @@
       }
       case 'player-detail': showPlayerDetail(t.getAttribute('data-player')); break;
       case 'session-detail': showSessionDetail(t.getAttribute('data-session')); break;
+      case 'export-pdf': PdfReport.download(DB); toast('PDF report downloaded.'); break;
       case 'export-data': Storage_.exportJson(DB); toast('Backup file downloaded.'); break;
       case 'import-data': importData(); break;
       case 'close-modal': closeModal(); break;

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>ThursDink Rotation and Progress Tracker</title>
+  <meta name="description" content="ThursDink — fair player rotation and progress tracking for pickleball sessions. Works offline.">
+  <meta name="theme-color" content="#14532d">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="ThursDink">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="app-title">
+      <img class="logo-img" src="logo.jpg" alt="ThursDink logo">
+      <h1>ThursDink <span class="subtitle">Rotation &amp; Progress Tracker</span></h1>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="play" role="tab">Play</button>
+      <button class="tab-btn" data-tab="players" role="tab">Players</button>
+      <button class="tab-btn" data-tab="stats" role="tab">Stats</button>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section id="view-play" class="view active"></section>
+    <section id="view-players" class="view"></section>
+    <section id="view-stats" class="view"></section>
+  </main>
+
+  <div id="modal-root"></div>
+  <div id="toast" class="toast" hidden></div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/app.js"></script>
+  <script>
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      window.addEventListener('load', function () {
+        navigator.serviceWorker.register('sw.js').catch(function (err) {
+          console.warn('Service worker registration failed:', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>

@@ -139,8 +139,10 @@
       scoreRow('A', m.teamA) +
       '<div class="vs">vs</div>' +
       scoreRow('B', m.teamB) +
-      '<div class="match-footer">' +
+      '<div class="match-footer"><div class="match-footer-left">' +
       '<button class="btn small" data-action="reshuffle-game" data-match="' + m.id + '">Reshuffle</button>' +
+      '<button class="btn small" data-action="edit-matchup" data-match="' + m.id + '">Edit players</button>' +
+      '</div>' +
       '<button class="btn primary" data-action="save-score" data-match="' + m.id + '">Save score</button>' +
       '</div></div>';
   }
@@ -439,6 +441,56 @@
     );
   }
 
+  function showEditMatchup(matchId) {
+    var session = activeSession();
+    if (!session) return;
+    var m = findGame(session, matchId);
+    if (!m || m.done) return;
+    var byId = playersById();
+    // Anyone on this court plus anyone waiting; players on other courts stay put
+    var eligible = m.teamA.concat(m.teamB, Engine.waitingPool(session))
+      .filter(function (id) { return byId[id]; });
+    function slot(label, idx, selectedId) {
+      var opts = eligible.map(function (id) {
+        return '<option value="' + id + '"' + (id === selectedId ? ' selected' : '') + '>' +
+          esc(byId[id].name) + '</option>';
+      }).join('');
+      return '<div class="field"><label>' + label + '</label>' +
+        '<select class="matchup-slot" data-slot="' + idx + '">' + opts + '</select></div>';
+    }
+    openModal(
+      '<h2>Edit matchup</h2>' +
+      '<p class="muted small-note">Court ' + m.court + '. Pick from the four on court or anyone waiting; ' +
+      'whoever you swap out goes back to the waiting list.</p>' +
+      '<div class="matchup-grid">' +
+      '<div class="matchup-team"><h3>Team 1</h3>' + slot('Player 1', 0, m.teamA[0]) + slot('Player 2', 1, m.teamA[1]) + '</div>' +
+      '<div class="matchup-team"><h3>Team 2</h3>' + slot('Player 1', 2, m.teamB[0]) + slot('Player 2', 3, m.teamB[1]) + '</div>' +
+      '</div>' +
+      '<div class="modal-actions">' +
+      '<button class="btn" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary" data-action="save-matchup" data-match="' + m.id + '">Save matchup</button>' +
+      '</div>'
+    );
+  }
+
+  function saveMatchup(matchId) {
+    var session = activeSession();
+    if (!session) return;
+    var m = findGame(session, matchId);
+    if (!m || m.done) return;
+    var ids = Array.prototype.slice.call(document.querySelectorAll('.matchup-slot'))
+      .map(function (s) { return s.value; });
+    var uniq = {};
+    ids.forEach(function (id) { uniq[id] = true; });
+    if (Object.keys(uniq).length !== 4) { toast('Pick 4 different players.'); return; }
+    m.teamA = [ids[0], ids[1]];
+    m.teamB = [ids[2], ids[3]];
+    persist();
+    closeModal();
+    renderPlay();
+    toast('Court ' + m.court + ' matchup updated.');
+  }
+
   function showEditFinished(matchId) {
     var session = activeSession();
     if (!session) return;
@@ -733,6 +785,8 @@
       }
       case 'save-score': saveScore(t.getAttribute('data-match')); break;
       case 'reshuffle-game': reshuffleGame(t.getAttribute('data-match')); break;
+      case 'edit-matchup': showEditMatchup(t.getAttribute('data-match')); break;
+      case 'save-matchup': saveMatchup(t.getAttribute('data-match')); break;
       case 'edit-finished': showEditFinished(t.getAttribute('data-match')); break;
       case 'save-finished': saveFinished(t.getAttribute('data-match')); break;
       case 'manage-players': { var s = activeSession(); if (s) showManagePlayers(s); break; }

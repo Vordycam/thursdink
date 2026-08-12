@@ -232,7 +232,11 @@ table.lb tbody tr:hover { background: var(--bg); }
 /* ---------- Continuous court flow ---------- */
 .free-court { border-style: dashed; background: #fbfdf9; }
 .free-note { margin: 6px 0; }
-.match-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.match-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+.match-footer-left { display: flex; gap: 6px; flex-wrap: wrap; }
+.matchup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.matchup-team h3 { margin: 0 0 8px; font-size: .95rem; }
+@media (max-width: 420px) { .matchup-grid { grid-template-columns: 1fr; } }
 .finished-list { padding-bottom: 10px; }
 .finished-row {
   display: flex; align-items: center; gap: 10px; padding: 8px 2px;

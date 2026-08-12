@@ -1,4 +1,7 @@
-/* Engine: fair round-robin doubles rotation, Elo-style ratings, stats. */
+/* Engine: continuous fair rotation (per-court flow), Elo-style ratings, stats.
+   Each court runs independently: as soon as its game is scored, the next game
+   starts from the waiting pool. Fairness balances games played and wait time;
+   team-making maximizes partner/opponent variety and competitive balance. */
 (function () {
   'use strict';
 
@@ -13,32 +16,6 @@
     return a < b ? a + '|' + b : b + '|' + a;
   }
 
-  /* Tallies from rounds played so far in this session. */
-  function sessionCounts(session) {
-    var sitOuts = {}, partners = {}, opponents = {}, games = {};
-    session.playerIds.forEach(function (id) {
-      sitOuts[id] = 0;
-      games[id] = 0;
-    });
-    session.rounds.forEach(function (round) {
-      round.sitOuts.forEach(function (id) {
-        sitOuts[id] = (sitOuts[id] || 0) + 1;
-      });
-      round.matches.forEach(function (m) {
-        var all = m.teamA.concat(m.teamB);
-        all.forEach(function (id) { games[id] = (games[id] || 0) + 1; });
-        partners[pairKey(m.teamA[0], m.teamA[1])] = (partners[pairKey(m.teamA[0], m.teamA[1])] || 0) + 1;
-        partners[pairKey(m.teamB[0], m.teamB[1])] = (partners[pairKey(m.teamB[0], m.teamB[1])] || 0) + 1;
-        m.teamA.forEach(function (a) {
-          m.teamB.forEach(function (b) {
-            opponents[pairKey(a, b)] = (opponents[pairKey(a, b)] || 0) + 1;
-          });
-        });
-      });
-    });
-    return { sitOuts: sitOuts, partners: partners, opponents: opponents, games: games };
-  }
-
   function shuffle(arr) {
     var a = arr.slice();
     for (var i = a.length - 1; i > 0; i--) {
@@ -48,23 +25,59 @@
     return a;
   }
 
-  /*
-   * Pick who sits out this round. Fairness rule: the players who have sat out
-   * the least (including a "credit" for late joiners so they are not forced to
-   * sit immediately) sit next. Ties broken by most games played, then randomly.
-   */
-  function pickSitOuts(session, numSit, counts) {
-    if (numSit <= 0) return [];
+  /* All matches of a session, whichever storage shape it uses
+     (legacy round-based sessions keep rounds[]; current ones use games[]). */
+  function sessionMatches(session) {
+    var out = [];
+    (session.rounds || []).forEach(function (r) {
+      out = out.concat(r.matches);
+    });
+    return out.concat(session.games || []);
+  }
+
+  function activeGames(session) {
+    return (session.games || []).filter(function (g) { return !g.done; });
+  }
+
+  /* Players in the session who are not on a court right now. */
+  function waitingPool(session) {
+    var busy = {};
+    activeGames(session).forEach(function (g) {
+      g.teamA.concat(g.teamB).forEach(function (id) { busy[id] = true; });
+    });
+    return session.playerIds.filter(function (id) { return !busy[id]; });
+  }
+
+  /* Tallies over every match created this session (active games count as
+     played so the load stays balanced while they are in progress). */
+  function sessionCounts(session) {
+    var partners = {}, opponents = {}, games = {};
+    sessionMatches(session).forEach(function (m) {
+      m.teamA.concat(m.teamB).forEach(function (id) { games[id] = (games[id] || 0) + 1; });
+      partners[pairKey(m.teamA[0], m.teamA[1])] = (partners[pairKey(m.teamA[0], m.teamA[1])] || 0) + 1;
+      partners[pairKey(m.teamB[0], m.teamB[1])] = (partners[pairKey(m.teamB[0], m.teamB[1])] || 0) + 1;
+      m.teamA.forEach(function (a) {
+        m.teamB.forEach(function (b) {
+          opponents[pairKey(a, b)] = (opponents[pairKey(a, b)] || 0) + 1;
+        });
+      });
+    });
+    return { partners: partners, opponents: opponents, games: games };
+  }
+
+  function effectiveGames(session, counts, id) {
     var meta = session.playerMeta || {};
-    var scored = shuffle(session.playerIds).map(function (id) {
-      var credit = (meta[id] && meta[id].sitCredit) || 0;
-      return { id: id, eff: (counts.sitOuts[id] || 0) + credit, games: counts.games[id] || 0 };
+    return (counts.games[id] || 0) + ((meta[id] && meta[id].gamesCredit) || 0);
+  }
+
+  function lastPlayedSeq(session, id) {
+    var last = 0;
+    (session.games || []).forEach(function (m) {
+      if (m.done && m.seq && (m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0)) {
+        last = Math.max(last, m.seq);
+      }
     });
-    scored.sort(function (a, b) {
-      if (a.eff !== b.eff) return a.eff - b.eff;
-      return b.games - a.games;
-    });
-    return scored.slice(0, numSit).map(function (s) { return s.id; });
+    return last;
   }
 
   /*
@@ -98,63 +111,80 @@
       var cost = pairingCost(opt[0], opt[1], counts, ratingOf);
       if (cost < bestCost) { bestCost = cost; best = opt; }
     });
-    return { teams: best, cost: bestCost };
+    return best;
   }
 
   /*
-   * Generate the next round: choose sit-outs, then search for the court
-   * assignment that maximizes partner/opponent variety via random restarts.
+   * Pick the next 4 players for a free court. Fairness rule: fewest games
+   * played first (late joiners carry a credit so they slot in evenly),
+   * then whoever has been waiting longest; ties break randomly.
    */
-  function generateRound(session, playersById) {
+  function nextGame(session, playersById) {
+    var pool = waitingPool(session).filter(function (id) { return playersById[id]; });
+    if (pool.length < 4) return null;
     var counts = sessionCounts(session);
-    var active = session.playerIds.filter(function (id) { return playersById[id]; });
-    var maxPlaying = Math.min(session.courtCount * 4, Math.floor(active.length / 4) * 4);
-    if (maxPlaying < 4) return null;
-    var numSit = active.length - maxPlaying;
-    var sitOuts = pickSitOuts(session, numSit, counts);
-    var sitSet = {};
-    sitOuts.forEach(function (id) { sitSet[id] = true; });
-    var playing = active.filter(function (id) { return !sitSet[id]; });
-
+    var scored = shuffle(pool).map(function (id) {
+      return { id: id, eff: effectiveGames(session, counts, id), last: lastPlayedSeq(session, id) };
+    });
+    scored.sort(function (a, b) {
+      if (a.eff !== b.eff) return a.eff - b.eff;
+      return a.last - b.last;
+    });
+    var four = scored.slice(0, 4).map(function (s) { return s.id; });
     function ratingOf(id) {
       return (playersById[id] && playersById[id].rating) || 1250;
     }
+    var teams = bestSplitOfFour(four, counts, ratingOf);
+    return { teamA: teams[0], teamB: teams[1] };
+  }
 
-    var bestAssign = null, bestCost = Infinity;
-    var iterations = 400;
-    for (var it = 0; it < iterations; it++) {
-      var order = shuffle(playing);
-      var matches = [];
-      var total = 0;
-      for (var c = 0; c < order.length / 4; c++) {
-        var four = order.slice(c * 4, c * 4 + 4);
-        var split = bestSplitOfFour(four, counts, ratingOf);
-        total += split.cost;
-        matches.push({ teamA: split.teams[0], teamB: split.teams[1] });
-      }
-      if (total < bestCost) {
-        bestCost = total;
-        bestAssign = matches;
-        if (bestCost === 0) break;
-      }
+  /* Start a game on every free court that has enough waiting players.
+     Returns the games that were started. */
+  function fillCourts(session, playersById) {
+    var started = [];
+    for (var c = 1; c <= session.courtCount; c++) {
+      var taken = activeGames(session).some(function (g) { return g.court === c; });
+      if (taken) continue;
+      var next = nextGame(session, playersById);
+      if (!next) break;
+      var game = {
+        id: Storage_.newId(),
+        court: c,
+        seq: session.nextSeq++,
+        teamA: next.teamA,
+        teamB: next.teamB,
+        scoreA: null,
+        scoreB: null,
+        done: false,
+        ratingDeltas: null
+      };
+      session.games.push(game);
+      started.push(game);
     }
+    return started;
+  }
 
-    return {
-      number: session.rounds.length + 1,
-      sitOuts: sitOuts,
-      matches: bestAssign.map(function (m, i) {
-        return {
-          id: Storage_.newId(),
-          court: i + 1,
-          teamA: m.teamA,
-          teamB: m.teamB,
-          scoreA: null,
-          scoreB: null,
-          done: false,
-          ratingDeltas: null
-        };
-      })
-    };
+  /* One-time upgrade of a legacy round-based ACTIVE session to the
+     continuous model. Finished sessions keep their shape (read-only). */
+  function migrateSession(session) {
+    if (session.status !== 'active' || session.games) return false;
+    session.games = [];
+    session.nextSeq = 1;
+    session.playerMeta = session.playerMeta || {};
+    Object.keys(session.playerMeta).forEach(function (id) {
+      if (session.playerMeta[id].gamesCredit === undefined) session.playerMeta[id].gamesCredit = 0;
+    });
+    var rounds = session.rounds || [];
+    rounds.forEach(function (r, i) {
+      r.matches.forEach(function (m) {
+        // Unscored games in past rounds were skipped under the old model
+        if (!m.done && i < rounds.length - 1) return;
+        m.seq = session.nextSeq++;
+        session.games.push(m);
+      });
+    });
+    session.rounds = [];
+    return true;
   }
 
   /* Elo update for a completed doubles game; returns {playerId: delta}. */
@@ -187,30 +217,26 @@
     });
   }
 
-  /* Aggregate stats from completed matches. scope: array of sessions. */
-  function computeStats(sessions, playerFilter) {
+  /* Aggregate W/L/points stats from completed matches. */
+  function computeStats(sessions) {
     var stats = {}; // id -> {games, wins, losses, pf, pa}
     function ensure(id) {
       if (!stats[id]) stats[id] = { games: 0, wins: 0, losses: 0, pf: 0, pa: 0 };
       return stats[id];
     }
     sessions.forEach(function (session) {
-      session.rounds.forEach(function (round) {
-        round.matches.forEach(function (m) {
-          if (!m.done) return;
-          var aWon = m.scoreA > m.scoreB;
-          m.teamA.forEach(function (id) {
-            if (playerFilter && !playerFilter[id]) return;
-            var s = ensure(id);
-            s.games++; s.pf += m.scoreA; s.pa += m.scoreB;
-            if (aWon) s.wins++; else s.losses++;
-          });
-          m.teamB.forEach(function (id) {
-            if (playerFilter && !playerFilter[id]) return;
-            var s = ensure(id);
-            s.games++; s.pf += m.scoreB; s.pa += m.scoreA;
-            if (aWon) s.losses++; else s.wins++;
-          });
+      sessionMatches(session).forEach(function (m) {
+        if (!m.done) return;
+        var aWon = m.scoreA > m.scoreB;
+        m.teamA.forEach(function (id) {
+          var s = ensure(id);
+          s.games++; s.pf += m.scoreA; s.pa += m.scoreB;
+          if (aWon) s.wins++; else s.losses++;
+        });
+        m.teamB.forEach(function (id) {
+          var s = ensure(id);
+          s.games++; s.pf += m.scoreB; s.pa += m.scoreA;
+          if (aWon) s.losses++; else s.wins++;
         });
       });
     });
@@ -219,8 +245,13 @@
 
   window.Engine = {
     initialRating: initialRating,
+    sessionMatches: sessionMatches,
+    activeGames: activeGames,
+    waitingPool: waitingPool,
     sessionCounts: sessionCounts,
-    generateRound: generateRound,
+    effectiveGames: effectiveGames,
+    fillCourts: fillCourts,
+    migrateSession: migrateSession,
     computeRatingDeltas: computeRatingDeltas,
     applyDeltas: applyDeltas,
     computeStats: computeStats,

@@ -1,8 +1,21 @@
-/* App: UI wiring for Play / Players / Stats views. */
+/* App: UI wiring for Play / Players / Stats views (continuous court flow). */
 (function () {
   'use strict';
 
   var DB = Storage_.load();
+
+  // One-time upgrade of legacy round-based active sessions
+  (function () {
+    var byId = {};
+    DB.players.forEach(function (p) { byId[p.id] = p; });
+    var changed = false;
+    DB.sessions.forEach(function (s) {
+      if (Engine.migrateSession(s)) changed = true;
+      // fill any court left free (e.g. right after migration)
+      if (s.status === 'active' && Engine.fillCourts(s, byId).length) changed = true;
+    });
+    if (changed) Storage_.save(DB);
+  })();
 
   function persist() { Storage_.save(DB); }
 
@@ -98,31 +111,22 @@
       '<div class="setup-actions"><button class="btn small" data-action="setup-all">Select all</button>' +
       '<button class="btn small" data-action="setup-none">Select none</button></div>' +
       '<div class="check-list">' + checks + '</div></div>' +
-      '<button class="btn primary big" data-action="start-session">Start session &amp; make round 1</button>' +
+      '<button class="btn primary big" data-action="start-session">Start session</button>' +
       '</div>';
   }
 
-  function scoreDisplay(m, side) {
-    var v = side === 'A' ? m.scoreA : m.scoreB;
-    return v === null || v === undefined ? '' : v;
+  function teamNames(team, byId) {
+    return team.map(function (id) {
+      return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
+    }).join(' &amp; ');
   }
 
-  function renderMatchCard(m, byId, editable) {
-    function names(team) {
-      return team.map(function (id) {
-        return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
-      }).join(' &amp; ');
-    }
+  function renderActiveGameCard(m, byId) {
     var scoreRow = function (side, team) {
-      var val = scoreDisplay(m, side);
-      if (m.done) {
-        var won = (side === 'A') === (m.scoreA > m.scoreB);
-        return '<div class="team-row' + (won ? ' winner' : '') + '">' +
-          '<div class="team-names">' + names(team) + (won ? ' <span class="win-tag">W</span>' : '') + '</div>' +
-          '<div class="score-final">' + val + '</div></div>';
-      }
+      var v = side === 'A' ? m.scoreA : m.scoreB;
+      var val = (v === null || v === undefined) ? '' : v;
       return '<div class="team-row">' +
-        '<div class="team-names">' + names(team) + '</div>' +
+        '<div class="team-names">' + teamNames(team, byId) + '</div>' +
         '<div class="score-ctl">' +
         '<button class="step-btn" data-action="score-step" data-match="' + m.id + '" data-side="' + side + '" data-d="-1">&minus;</button>' +
         '<input type="number" class="score-input" inputmode="numeric" min="0" max="99" ' +
@@ -130,24 +134,45 @@
         '<button class="step-btn" data-action="score-step" data-match="' + m.id + '" data-side="' + side + '" data-d="1">+</button>' +
         '</div></div>';
     };
-    var footer;
-    if (m.done) {
-      footer = editable ? '<button class="btn small" data-action="edit-score" data-match="' + m.id + '">Edit score</button>' : '';
-    } else {
-      footer = '<button class="btn primary" data-action="save-score" data-match="' + m.id + '">Save score</button>';
-    }
-    return '<div class="match-card' + (m.done ? ' done' : '') + '">' +
+    return '<div class="match-card">' +
       '<div class="court-label">Court ' + m.court + '</div>' +
       scoreRow('A', m.teamA) +
       '<div class="vs">vs</div>' +
       scoreRow('B', m.teamB) +
-      '<div class="match-footer">' + footer + '</div>' +
+      '<div class="match-footer">' +
+      '<button class="btn small" data-action="reshuffle-game" data-match="' + m.id + '">Reshuffle</button>' +
+      '<button class="btn primary" data-action="save-score" data-match="' + m.id + '">Save score</button>' +
+      '</div></div>';
+  }
+
+  function renderFreeCourtCard(court, poolCount) {
+    return '<div class="match-card free-court">' +
+      '<div class="court-label">Court ' + court + '</div>' +
+      '<p class="muted free-note">Free &mdash; ' +
+      (poolCount > 0 ? 'only ' + poolCount + ' waiting, needs 4.' : 'no one is waiting.') +
+      '</p></div>';
+  }
+
+  function renderFinishedGameRow(m, byId) {
+    var aWon = m.scoreA > m.scoreB;
+    return '<div class="finished-row">' +
+      '<span class="finished-court muted">C' + m.court + '</span>' +
+      '<span class="finished-teams">' +
+      '<span class="' + (aWon ? 'fin-win' : '') + '">' + teamNames(m.teamA, byId) + ' ' + m.scoreA + '</span>' +
+      ' &ndash; ' +
+      '<span class="' + (!aWon ? 'fin-win' : '') + '">' + m.scoreB + ' ' + teamNames(m.teamB, byId) + '</span>' +
+      '</span>' +
+      '<button class="btn small" data-action="edit-finished" data-match="' + m.id + '">Edit</button>' +
       '</div>';
   }
 
   function renderActiveSession(session) {
     var byId = playersById();
-    var current = session.rounds[session.rounds.length - 1];
+    var actives = Engine.activeGames(session);
+    var finished = (session.games || []).filter(function (g) { return g.done; });
+    var pool = Engine.waitingPool(session);
+    var counts = Engine.sessionCounts(session);
+
     var html = '<div class="session-bar">' +
       '<div><strong>Session</strong> &middot; ' + fmtDate(session.startedAt) +
       ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
@@ -156,45 +181,36 @@
       '<button class="btn small danger-outline" data-action="end-session">End session</button>' +
       '</div></div>';
 
-    // Previous rounds, collapsed
-    for (var i = 0; i < session.rounds.length - 1; i++) {
-      var r = session.rounds[i];
-      html += '<details class="round-past"><summary>Round ' + r.number +
-        ' <span class="muted">(' + r.matches.filter(function (m) { return m.done; }).length + '/' + r.matches.length + ' scored)</span></summary>' +
-        '<div class="round-body">' +
-        r.matches.map(function (m) { return renderMatchCard(m, byId, true); }).join('') +
-        renderSitOuts(r, byId) +
+    html += '<div class="courts-grid">';
+    for (var c = 1; c <= session.courtCount; c++) {
+      var g = null;
+      actives.forEach(function (a) { if (a.court === c) g = a; });
+      html += g ? renderActiveGameCard(g, byId) : renderFreeCourtCard(c, pool.length);
+    }
+    html += '</div>';
+
+    if (pool.length) {
+      html += '<div class="sitouts"><span class="sitout-label">Waiting to play:</span> ' +
+        pool.map(function (id) {
+          return '<span class="chip">' + esc(byId[id] ? byId[id].name : '?') +
+            ' <span class="muted">(' + (counts.games[id] || 0) + ')</span></span>';
+        }).join(' ') +
+        '<div class="muted small-note">Number = games played. Fewest games and longest wait go on next.</div></div>';
+    }
+
+    if (finished.length) {
+      html += '<details class="round-past" open><summary>Finished games (' + finished.length + ')</summary>' +
+        '<div class="finished-list">' +
+        finished.slice().reverse().map(function (m) { return renderFinishedGameRow(m, byId); }).join('') +
         '</div></details>';
     }
 
-    // Current round
-    if (current) {
-      var anyScored = current.matches.some(function (m) { return m.done; });
-      html += '<div class="round-current">' +
-        '<div class="round-head"><h2>Round ' + current.number + '</h2>' +
-        (!anyScored ? '<button class="btn small" data-action="reshuffle">Reshuffle</button>' : '') +
-        '</div>' +
-        current.matches.map(function (m) { return renderMatchCard(m, byId, true); }).join('') +
-        renderSitOuts(current, byId) +
-        '</div>';
-      html += '<button class="btn primary big" data-action="next-round">Next round &rarr;</button>';
-    }
-
-    // Session standings so far
     var stats = Engine.computeStats([session]);
     var rows = leaderboardRows(stats, byId, session.playerIds);
     if (rows.trim()) {
       html += '<div class="card"><h3>Session standings</h3>' + leaderboardTable(rows) + '</div>';
     }
     return html;
-  }
-
-  function renderSitOuts(round, byId) {
-    if (!round.sitOuts.length) return '';
-    return '<div class="sitouts"><span class="sitout-label">Sitting out:</span> ' +
-      round.sitOuts.map(function (id) {
-        return '<span class="chip">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
-      }).join(' ') + '</div>';
   }
 
   /* ---------- Leaderboards ---------- */
@@ -273,22 +289,23 @@
 
   /* ---------- Stats view ---------- */
 
+  function countDoneGames(session) {
+    var n = 0;
+    Engine.sessionMatches(session).forEach(function (m) { if (m.done) n++; });
+    return n;
+  }
+
   function renderStats() {
     var view = document.getElementById('view-stats');
     var byId = playersById();
-    var doneSessions = DB.sessions.filter(function (s) { return s.status === 'done'; });
     var stats = Engine.computeStats(DB.sessions);
     var rows = leaderboardRows(stats, byId);
 
     var sessionsHtml = DB.sessions.slice().reverse().map(function (s) {
-      var games = 0;
-      s.rounds.forEach(function (r) {
-        r.matches.forEach(function (m) { if (m.done) games++; });
-      });
       return '<div class="player-row" data-action="session-detail" data-session="' + s.id + '">' +
         '<div class="player-main"><strong>' + fmtDate(s.startedAt) + '</strong>' +
-        '<span class="muted">' + s.playerIds.length + ' players &middot; ' + s.rounds.length + ' rounds &middot; ' +
-        games + ' games' + (s.status === 'active' ? ' &middot; in progress' : '') + '</span></div>' +
+        '<span class="muted">' + s.playerIds.length + ' players &middot; ' +
+        countDoneGames(s) + ' games' + (s.status === 'active' ? ' &middot; in progress' : '') + '</span></div>' +
         '<span class="chev">&rsaquo;</span></div>';
     }).join('');
 
@@ -309,7 +326,7 @@
       '</div></div>';
   }
 
-  /* ---------- Player detail / session detail modals ---------- */
+  /* ---------- Detail modals ---------- */
 
   function sparkline(history) {
     if (!history || history.length < 2) {
@@ -338,10 +355,8 @@
     var pct = s.games ? Math.round(100 * s.wins / s.games) : 0;
 
     var sessionsHtml = DB.sessions.slice().reverse().map(function (sess) {
-      var inIt = sess.rounds.some(function (r) {
-        return r.matches.some(function (m) {
-          return m.teamA.indexOf(playerId) >= 0 || m.teamB.indexOf(playerId) >= 0;
-        });
+      var inIt = Engine.sessionMatches(sess).some(function (m) {
+        return m.teamA.indexOf(playerId) >= 0 || m.teamB.indexOf(playerId) >= 0;
       });
       if (!inIt) return '';
       var st = Engine.computeStats([sess])[playerId] || { wins: 0, losses: 0, pf: 0, pa: 0 };
@@ -374,7 +389,7 @@
     var rows = leaderboardRows(stats, byId, sess.playerIds);
     openModal(
       '<h2>' + fmtDate(sess.startedAt) + '</h2>' +
-      '<p class="muted">' + sess.playerIds.length + ' players &middot; ' + sess.rounds.length + ' rounds' +
+      '<p class="muted">' + sess.playerIds.length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       (rows.trim() ? leaderboardTable(rows) : '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
@@ -404,7 +419,6 @@
   }
 
   function showManagePlayers(session) {
-    var byId = playersById();
     var roster = DB.players.filter(function (p) { return !p.archived || session.playerIds.indexOf(p.id) >= 0; });
     var checks = roster.map(function (p) {
       var inSess = session.playerIds.indexOf(p.id) >= 0;
@@ -415,11 +429,32 @@
     }).join('');
     openModal(
       '<h2>Session players</h2>' +
-      '<p class="muted small-note">Check people in or out. Changes apply from the next round; rounds already made are unchanged.</p>' +
+      '<p class="muted small-note">Check people in or out. Anyone mid-game finishes that game; ' +
+      'checked-out players just get no new games.</p>' +
       '<div class="check-list">' + checks + '</div>' +
       '<div class="modal-actions">' +
       '<button class="btn" data-action="close-modal">Cancel</button>' +
       '<button class="btn primary" data-action="apply-manage-players">Apply</button>' +
+      '</div>'
+    );
+  }
+
+  function showEditFinished(matchId) {
+    var session = activeSession();
+    if (!session) return;
+    var m = findGame(session, matchId);
+    if (!m || !m.done) return;
+    var byId = playersById();
+    openModal(
+      '<h2>Edit score</h2>' +
+      '<p class="muted">Court ' + m.court + '</p>' +
+      '<div class="field"><label>' + teamNames(m.teamA, byId) + '</label>' +
+      '<input type="number" id="edit-score-a" inputmode="numeric" min="0" max="99" value="' + m.scoreA + '"></div>' +
+      '<div class="field"><label>' + teamNames(m.teamB, byId) + '</label>' +
+      '<input type="number" id="edit-score-b" inputmode="numeric" min="0" max="99" value="' + m.scoreB + '"></div>' +
+      '<div class="modal-actions">' +
+      '<button class="btn" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary" data-action="save-finished" data-match="' + m.id + '">Save</button>' +
       '</div>'
     );
   }
@@ -466,16 +501,24 @@
       courtCount: courts,
       playerIds: ids,
       playerMeta: {},
-      rounds: [],
+      games: [],
+      nextSeq: 1,
       status: 'active'
     };
-    var round = Engine.generateRound(session, playersById());
-    if (!round) { toast('Could not build a round.'); return; }
-    session.rounds.push(round);
+    var started = Engine.fillCourts(session, playersById());
+    if (!started.length) { toast('Could not build a game.'); return; }
     DB.sessions.push(session);
     persist();
     renderPlay();
-    toast('Session started — round 1 is up.');
+    toast('Session started — games are up on ' + started.length + ' court(s).');
+  }
+
+  function findGame(session, matchId) {
+    var games = session.games || [];
+    for (var i = 0; i < games.length; i++) {
+      if (games[i].id === matchId) return games[i];
+    }
+    return null;
   }
 
   function collectScore(matchId, side) {
@@ -485,80 +528,64 @@
     return isNaN(v) ? null : v;
   }
 
-  function findMatch(session, matchId) {
-    for (var i = 0; i < session.rounds.length; i++) {
-      var ms = session.rounds[i].matches;
-      for (var j = 0; j < ms.length; j++) {
-        if (ms[j].id === matchId) return ms[j];
-      }
-    }
-    return null;
+  function validScores(a, b) {
+    if (a === null || b === null) { toast('Enter both scores.'); return false; }
+    if (a < 0 || b < 0) { toast('Scores cannot be negative.'); return false; }
+    if (a === b) { toast('Pickleball games cannot end in a tie.'); return false; }
+    return true;
   }
 
   function saveScore(matchId) {
     var session = activeSession();
     if (!session) return;
-    var m = findMatch(session, matchId);
-    if (!m) return;
+    var m = findGame(session, matchId);
+    if (!m || m.done) return;
     var a = collectScore(matchId, 'A');
     var b = collectScore(matchId, 'B');
-    if (a === null || b === null) { toast('Enter both scores.'); return; }
-    if (a < 0 || b < 0) { toast('Scores cannot be negative.'); return; }
-    if (a === b) { toast('Pickleball games cannot end in a tie.'); return; }
+    if (!validScores(a, b)) return;
     m.scoreA = a;
     m.scoreB = b;
     m.done = true;
     var byId = playersById();
     m.ratingDeltas = Engine.computeRatingDeltas(m, byId);
     Engine.applyDeltas(m.ratingDeltas, byId, 1);
+    var started = Engine.fillCourts(session, byId);
     persist();
     renderPlay();
+    if (started.length) {
+      toast('Court ' + started.map(function (g) { return g.court; }).join(' & ') + ': next game is up!');
+    }
   }
 
-  function editScore(matchId) {
+  function saveFinished(matchId) {
     var session = activeSession();
     if (!session) return;
-    var m = findMatch(session, matchId);
+    var m = findGame(session, matchId);
     if (!m || !m.done) return;
-    if (m.ratingDeltas) {
-      Engine.applyDeltas(m.ratingDeltas, playersById(), -1);
-      m.ratingDeltas = null;
-    }
-    m.done = false;
+    var a = parseInt(document.getElementById('edit-score-a').value, 10);
+    var b = parseInt(document.getElementById('edit-score-b').value, 10);
+    if (isNaN(a)) a = null;
+    if (isNaN(b)) b = null;
+    if (!validScores(a, b)) return;
+    var byId = playersById();
+    if (m.ratingDeltas) Engine.applyDeltas(m.ratingDeltas, byId, -1);
+    m.scoreA = a;
+    m.scoreB = b;
+    m.ratingDeltas = Engine.computeRatingDeltas(m, byId);
+    Engine.applyDeltas(m.ratingDeltas, byId, 1);
     persist();
+    closeModal();
     renderPlay();
+    toast('Score updated.');
   }
 
-  function nextRound() {
+  function reshuffleGame(matchId) {
     var session = activeSession();
     if (!session) return;
-    var current = session.rounds[session.rounds.length - 1];
-    var unscored = current.matches.filter(function (m) { return !m.done; }).length;
-    if (unscored > 0 &&
-        !confirm(unscored + ' game(s) in round ' + current.number +
-          ' have no saved score. They will not count in stats. Make the next round anyway?')) {
-      return;
-    }
-    var round = Engine.generateRound(session, playersById());
-    if (!round) { toast('Not enough players for a round. Add players via the Players button.'); return; }
-    session.rounds.push(round);
-    persist();
-    renderPlay();
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
-  function reshuffleRound() {
-    var session = activeSession();
-    if (!session) return;
-    var current = session.rounds[session.rounds.length - 1];
-    if (current.matches.some(function (m) { return m.done; })) {
-      toast('Cannot reshuffle after scores are saved.');
-      return;
-    }
-    session.rounds.pop();
-    var round = Engine.generateRound(session, playersById());
-    if (round) session.rounds.push(round);
-    else session.rounds.push(current);
+    var m = findGame(session, matchId);
+    if (!m || m.done) return;
+    session.games = session.games.filter(function (g) { return g.id !== matchId; });
+    Engine.fillCourts(session, playersById());
     persist();
     renderPlay();
   }
@@ -571,39 +598,33 @@
     if (ids.length < 4) { toast('A session needs at least 4 players.'); return; }
     var counts = Engine.sessionCounts(session);
     var meta = session.playerMeta || {};
-    // Late joiners get sit-out credit equal to the least-sat current player,
-    // so they are neither forced to sit immediately nor jump the whole queue.
+    // Late joiners are credited with the lightest current load, so they
+    // slot into the queue evenly instead of monopolizing the next games.
     var effs = session.playerIds.map(function (id) {
-      return (counts.sitOuts[id] || 0) + ((meta[id] && meta[id].sitCredit) || 0);
+      return Engine.effectiveGames(session, counts, id);
     });
     var minEff = effs.length ? Math.min.apply(null, effs) : 0;
     ids.forEach(function (id) {
-      if (session.playerIds.indexOf(id) < 0) {
-        meta[id] = { sitCredit: minEff, joinedRound: session.rounds.length + 1 };
+      if (session.playerIds.indexOf(id) < 0 && !meta[id]) {
+        meta[id] = { gamesCredit: minEff };
       }
     });
     session.playerIds = ids;
     session.playerMeta = meta;
+    var started = Engine.fillCourts(session, playersById());
     persist();
     closeModal();
     renderPlay();
-    toast('Player list updated — applies from the next round.');
+    toast(started.length ? 'Players updated — a free court just filled!' : 'Player list updated.');
   }
 
   function endSession() {
     var session = activeSession();
     if (!session) return;
-    var current = session.rounds[session.rounds.length - 1];
-    var unscoredMsg = '';
-    if (current) {
-      var unscored = current.matches.filter(function (m) { return !m.done; }).length;
-      if (unscored > 0) unscoredMsg = ' ' + unscored + ' unscored game(s) will not count.';
-    }
-    if (!confirm('End this session?' + unscoredMsg)) return;
-    // Drop entirely-unscored trailing round so it does not pollute history
-    if (current && current.matches.every(function (m) { return !m.done; })) {
-      session.rounds.pop();
-    }
+    var unscored = Engine.activeGames(session).length;
+    var msg = 'End this session?' + (unscored ? ' ' + unscored + ' game(s) in progress have no score and will not count.' : '');
+    if (!confirm(msg)) return;
+    session.games = (session.games || []).filter(function (g) { return g.done; });
     session.status = 'done';
     session.endedAt = Date.now();
     persist();
@@ -655,6 +676,7 @@
         if (err) { toast(err); return; }
         if (!confirm('Replace ALL current data with the contents of "' + file.name + '"? This cannot be undone.')) return;
         DB = data;
+        DB.sessions.forEach(function (s) { Engine.migrateSession(s); });
         persist();
         renderAll();
         toast('Data imported.');
@@ -710,9 +732,9 @@
         break;
       }
       case 'save-score': saveScore(t.getAttribute('data-match')); break;
-      case 'edit-score': editScore(t.getAttribute('data-match')); break;
-      case 'next-round': nextRound(); break;
-      case 'reshuffle': reshuffleRound(); break;
+      case 'reshuffle-game': reshuffleGame(t.getAttribute('data-match')); break;
+      case 'edit-finished': showEditFinished(t.getAttribute('data-match')); break;
+      case 'save-finished': saveFinished(t.getAttribute('data-match')); break;
       case 'manage-players': { var s = activeSession(); if (s) showManagePlayers(s); break; }
       case 'apply-manage-players': applyManagePlayers(); break;
       case 'end-session': endSession(); break;

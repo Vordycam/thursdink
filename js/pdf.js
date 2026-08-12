@@ -154,7 +154,7 @@
     else doc.text(MARGIN, 'No games recorded yet.', 10, false);
 
     var done = db.sessions.filter(function (s) {
-      return s.rounds.some(function (r) { return r.matches.some(function (m) { return m.done; }); });
+      return Engine.sessionMatches(s).some(function (m) { return m.done; });
     });
     if (done.length) {
       doc.space(10);
@@ -163,13 +163,10 @@
       doc.space(4);
       done.slice().reverse().forEach(function (sess) {
         var games = 0;
-        sess.rounds.forEach(function (r) {
-          r.matches.forEach(function (m) { if (m.done) games++; });
-        });
+        Engine.sessionMatches(sess).forEach(function (m) { if (m.done) games++; });
         doc.ensure(70);
         doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + sess.playerIds.length + ' players, ' +
-          sess.rounds.length + ' rounds, ' + games + ' games' +
-          (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
+          games + ' games' + (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
         doc.space(2);
         writeLeaderboard(doc, leaderboardList(Engine.computeStats([sess]), byId, sess.playerIds));
         doc.space(8);

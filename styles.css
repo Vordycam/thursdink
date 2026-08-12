@@ -229,7 +229,20 @@ table.lb tbody tr:hover { background: var(--bg); }
   box-shadow: 0 4px 16px rgba(0,0,0,.25); max-width: 90vw; text-align: center;
 }
 
+/* ---------- Continuous court flow ---------- */
+.free-court { border-style: dashed; background: #fbfdf9; }
+.free-note { margin: 6px 0; }
+.match-footer { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.finished-list { padding-bottom: 10px; }
+.finished-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 2px;
+  border-bottom: 1px solid var(--line); font-size: .95rem;
+}
+.finished-row:last-child { border-bottom: none; }
+.finished-court { flex: none; font-weight: 700; }
+.finished-teams { flex: 1; line-height: 1.4; }
+.fin-win { color: var(--win); font-weight: 700; }
+
 @media (min-width: 700px) {
-  .round-current, .round-body { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .round-current .round-head, .round-current .sitouts, .round-body .sitouts { grid-column: 1 / -1; }
+  .courts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 }

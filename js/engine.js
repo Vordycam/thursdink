@@ -5,8 +5,24 @@
 (function () {
   'use strict';
 
-  var SKILL_RATINGS = { '2.5': 1000, '3.0': 1100, '3.5': 1250, '4.0': 1400, '4.5': 1550, '5.0': 1700 };
+  /* USA Pickleball skill scale, 2.0 through 5.5, mapped onto a rating ladder. */
+  var SKILL_RATINGS = { '2.0': 900, '2.5': 1000, '3.0': 1100, '3.5': 1250, '4.0': 1400, '4.5': 1550, '5.0': 1700, '5.5': 1850 };
   var ELO_K = 32;
+
+  /* Rec games are played to 11, win by 2 (USA Pickleball rule 12.A). */
+  var GAME_TARGET = 11;
+
+  /* Team-making weights. Repeat partners and opponents dominate; the rating
+     term keeps games competitive without overriding variety. */
+  var RATING_WEIGHT = 0.1;
+
+  /* Choosing WHICH four play next: among players tied on games played, the
+     engine may look a little past strict wait order to avoid a bad game —
+     but passing over someone who has waited longer costs this much, so it
+     only happens when the alternative is clearly worse (a third repeat
+     partnership, a badly lopsided court). Fewer games always wins outright. */
+  var LEAPFROG_PENALTY = 60;
+  var TIER_WINDOW = 2;
 
   function initialRating(skill) {
     return SKILL_RATINGS[skill] || 1250;
@@ -95,7 +111,7 @@
       });
     });
     var diff = Math.abs((ratingOf(t1[0]) + ratingOf(t1[1])) - (ratingOf(t2[0]) + ratingOf(t2[1])));
-    cost += diff * 0.02;
+    cost += diff * RATING_WEIGHT;
     return cost;
   }
 
@@ -111,31 +127,145 @@
       var cost = pairingCost(opt[0], opt[1], counts, ratingOf);
       if (cost < bestCost) { bestCost = cost; best = opt; }
     });
-    return best;
+    return { teams: best, cost: bestCost };
   }
 
   /*
-   * Pick the next 4 players for a free court. Fairness rule: fewest games
-   * played first (late joiners carry a credit so they slot in evenly),
-   * then whoever has been waiting longest; ties break randomly.
+   * When a player's wait began, in game-sequence terms: the game they last
+   * finished, or the moment they joined if they have not played yet.
+   *
+   * This is the fix for late joiners jumping the line. A player who had never
+   * played returned 0 here — read by the sort as "waiting since before game
+   * 1" — so anyone added mid-session went straight to the front, ahead of
+   * people who had genuinely been waiting for several games.
    */
-  function nextGame(session, playersById) {
-    var pool = waitingPool(session).filter(function (id) { return playersById[id]; });
-    if (pool.length < 4) return null;
+  function waitStart(session, id) {
+    var meta = (session.playerMeta || {})[id];
+    var joined = (meta && meta.joinedSeq) || 0;
+    return Math.max(lastPlayedSeq(session, id), joined);
+  }
+
+  /*
+   * Set the session's player list. Newcomers are credited with the lightest
+   * current load, so they cannot monopolise the next several games to "catch
+   * up", and their wait is clocked from now, so they cannot jump anyone who is
+   * already in line. Rejoining refreshes the clock but keeps earlier credit.
+   */
+  function setSessionPlayers(session, ids) {
     var counts = sessionCounts(session);
-    var scored = shuffle(pool).map(function (id) {
-      return { id: id, eff: effectiveGames(session, counts, id), last: lastPlayedSeq(session, id) };
+    var meta = session.playerMeta || (session.playerMeta = {});
+    var effs = session.playerIds.map(function (id) { return effectiveGames(session, counts, id); });
+    var minEff = effs.length ? Math.min.apply(null, effs) : 0;
+    ids.forEach(function (id) {
+      if (session.playerIds.indexOf(id) >= 0) return;
+      if (!meta[id]) meta[id] = { gamesCredit: minEff };
+      meta[id].joinedSeq = session.nextSeq || 1;
+    });
+    session.playerIds = ids;
+  }
+
+  /* Waiting players in the order they are entitled to play: fewest games
+     first, then longest wait. `randomize` breaks exact ties by chance (used
+     when actually picking a game); otherwise roster order keeps the displayed
+     list from shuffling between renders. */
+  function rankPool(session, playersById, randomize) {
+    var pool = waitingPool(session).filter(function (id) { return playersById[id]; });
+    var counts = sessionCounts(session);
+    var order = randomize ? shuffle(pool) : pool;
+    var scored = order.map(function (id) {
+      return { id: id, eff: effectiveGames(session, counts, id), wait: waitStart(session, id) };
     });
     scored.sort(function (a, b) {
       if (a.eff !== b.eff) return a.eff - b.eff;
-      return a.last - b.last;
+      return a.wait - b.wait;
     });
-    var four = scored.slice(0, 4).map(function (s) { return s.id; });
+    return { scored: scored, counts: counts };
+  }
+
+  function queueOrder(session, playersById) {
+    return rankPool(session, playersById, false).scored;
+  }
+
+  /* All k-sized subsets of a short list. Bounded by TIER_WINDOW, so at most
+     C(6,4) = 15 combinations are ever evaluated. */
+  function combos(items, k) {
+    var out = [];
+    (function rec(start, acc) {
+      if (acc.length === k) { out.push(acc.slice()); return; }
+      for (var i = start; i < items.length; i++) {
+        acc.push(items[i]);
+        rec(i + 1, acc);
+        acc.pop();
+      }
+    })(0, []);
+    return out;
+  }
+
+  /*
+   * Pick the next 4 players for a free court.
+   *
+   * Fairness is the hard constraint: anyone with strictly fewer games than
+   * the fourth-ranked player is locked in and can never be skipped. Only
+   * among players TIED on games played does the engine look a little past
+   * strict wait order, and each player passed over costs LEAPFROG_PENALTY —
+   * so a longer-waiting player is only stepped over when the alternative
+   * game is clearly worse, never for a marginal gain.
+   */
+  function nextGame(session, playersById) {
+    var ranked = rankPool(session, playersById, true);
+    var scored = ranked.scored, counts = ranked.counts;
+    if (scored.length < 4) return null;
+
     function ratingOf(id) {
       return (playersById[id] && playersById[id].rating) || 1250;
     }
-    var teams = bestSplitOfFour(four, counts, ratingOf);
-    return { teamA: teams[0], teamB: teams[1] };
+
+    var cutoff = scored[3].eff;
+    var locked = [], tier = [];
+    scored.forEach(function (s) {
+      if (s.eff < cutoff) locked.push(s);
+      else if (s.eff === cutoff) tier.push(s);
+    });
+    var need = 4 - locked.length;
+    var candidates = tier.slice(0, need + TIER_WINDOW);
+
+    var best = null, bestCost = Infinity;
+    combos(candidates, need).forEach(function (pick) {
+      var four = locked.concat(pick).map(function (s) { return s.id; });
+      var split = bestSplitOfFour(four, counts, ratingOf);
+      var cost = split.cost;
+      pick.forEach(function (chosen) {
+        candidates.forEach(function (other) {
+          if (pick.indexOf(other) < 0 && other.wait < chosen.wait) cost += LEAPFROG_PENALTY;
+        });
+      });
+      if (cost < bestCost) { bestCost = cost; best = split; }
+    });
+    return { teamA: best.teams[0], teamB: best.teams[1] };
+  }
+
+  /*
+   * Validate a final score against USA Pickleball rules. A game is won by
+   * the first side to reach the target with a two-point margin; the margin
+   * is a hard rule, the target is the rec-play default and only warns, since
+   * some groups play short or timed games.
+   */
+  function checkScore(a, b) {
+    if (a === null || b === null || a === undefined || b === undefined || isNaN(a) || isNaN(b)) {
+      return { ok: false, error: 'Enter both scores.', warn: null };
+    }
+    if (a < 0 || b < 0) return { ok: false, error: 'Scores cannot be negative.', warn: null };
+    if (a === b) return { ok: false, error: 'Pickleball games cannot end in a tie.', warn: null };
+    var hi = Math.max(a, b), lo = Math.min(a, b);
+    if (hi - lo < 2) {
+      return { ok: false, warn: null,
+        error: 'A game must be won by 2 points (USA Pickleball rules). ' + hi + '–' + lo + ' is not a finished game.' };
+    }
+    var result = { ok: true, error: null, warn: null };
+    if (hi < GAME_TARGET) {
+      result.warn = 'Games are normally played to ' + GAME_TARGET + '. Save ' + hi + '–' + lo + ' anyway?';
+    }
+    return result;
   }
 
   /* Start a game on every free court that has enough waiting players.
@@ -185,6 +315,28 @@
     });
     session.rounds = [];
     return true;
+  }
+
+  /*
+   * One-time repair for sessions that are already running when this fix
+   * ships. A player checked in under the old app has gamesCredit but no
+   * joinedSeq, so their wait would still read as "since game 0" and they
+   * would jump the line once more. Stamp them as joining now: back of their
+   * tier once, then they progress normally. Only late joiners ever have a
+   * meta entry, so original players are untouched. Returns whether anything
+   * changed, so the caller knows to save.
+   */
+  function normalizeSession(session) {
+    if (session.status !== 'active') return false;
+    var meta = session.playerMeta || {};
+    var changed = false;
+    Object.keys(meta).forEach(function (id) {
+      if (meta[id] && meta[id].joinedSeq === undefined) {
+        meta[id].joinedSeq = session.nextSeq || 1;
+        changed = true;
+      }
+    });
+    return changed;
   }
 
   /* Elo update for a completed doubles game; returns {playerId: delta}. */
@@ -250,11 +402,17 @@
     waitingPool: waitingPool,
     sessionCounts: sessionCounts,
     effectiveGames: effectiveGames,
+    waitStart: waitStart,
+    setSessionPlayers: setSessionPlayers,
+    queueOrder: queueOrder,
     fillCourts: fillCourts,
+    checkScore: checkScore,
     migrateSession: migrateSession,
+    normalizeSession: normalizeSession,
     computeRatingDeltas: computeRatingDeltas,
     applyDeltas: applyDeltas,
     computeStats: computeStats,
-    SKILL_LEVELS: ['2.5', '3.0', '3.5', '4.0', '4.5', '5.0']
+    GAME_TARGET: GAME_TARGET,
+    SKILL_LEVELS: ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']
   };
 })();

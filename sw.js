@@ -1,7 +1,9 @@
 /* Service worker: precache the app shell so everything works offline.
    Strategy: stale-while-revalidate — serve from cache instantly (offline-safe),
    refresh the cache in the background so the next load picks up updates. */
-var CACHE = 'pbr-v6';
+/* Bump this whenever js/ or styles.css changes, or installed apps keep
+   serving the old files from cache and never see the update. */
+var CACHE = 'pbr-v7';
 var ASSETS = [
   './',
   './index.html',

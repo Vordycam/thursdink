@@ -11,6 +11,8 @@
     var changed = false;
     DB.sessions.forEach(function (s) {
       if (Engine.migrateSession(s)) changed = true;
+      // late joiners added before joinedSeq existed get their wait clocked now
+      if (Engine.normalizeSession(s)) changed = true;
       // fill any court left free (e.g. right after migration)
       if (s.status === 'active' && Engine.fillCourts(s, byId).length) changed = true;
     });
@@ -192,12 +194,18 @@
     html += '</div>';
 
     if (pool.length) {
-      html += '<div class="sitouts"><span class="sitout-label">Waiting to play:</span> ' +
-        pool.map(function (id) {
-          return '<span class="chip">' + esc(byId[id] ? byId[id].name : '?') +
-            ' <span class="muted">(' + (counts.games[id] || 0) + ')</span></span>';
+      // Shown in the order people are entitled to play, so anyone can see
+      // where they stand and that a newcomer has joined the back of the line.
+      var queue = Engine.queueOrder(session, byId);
+      html += '<div class="sitouts"><span class="sitout-label">Waiting to play, in order:</span> ' +
+        queue.map(function (q, i) {
+          return '<span class="chip' + (i < 4 ? ' chip-next' : '') + '">' +
+            '<span class="muted">' + (i + 1) + '.</span> ' +
+            esc(byId[q.id] ? byId[q.id].name : '?') +
+            ' <span class="muted">(' + (counts.games[q.id] || 0) + ')</span></span>';
         }).join(' ') +
-        '<div class="muted small-note">Number = games played. Fewest games and longest wait go on next.</div></div>';
+        '<div class="muted small-note">Number in brackets = games played. Fewest games go first, then whoever has waited longest. ' +
+        'Someone who joins late starts at the back of their group.</div></div>';
     }
 
     if (finished.length) {
@@ -580,10 +588,13 @@
     return isNaN(v) ? null : v;
   }
 
+  /* USA Pickleball scoring rules live in the engine; this just surfaces them.
+     A margin under 2 is refused outright. A game that never reached 11 is
+     unusual but not impossible (short or timed play), so it asks first. */
   function validScores(a, b) {
-    if (a === null || b === null) { toast('Enter both scores.'); return false; }
-    if (a < 0 || b < 0) { toast('Scores cannot be negative.'); return false; }
-    if (a === b) { toast('Pickleball games cannot end in a tie.'); return false; }
+    var check = Engine.checkScore(a, b);
+    if (!check.ok) { toast(check.error); return false; }
+    if (check.warn && !confirm(check.warn)) return false;
     return true;
   }
 
@@ -648,21 +659,10 @@
     var ids = Array.prototype.slice.call(document.querySelectorAll('.manage-player:checked'))
       .map(function (el) { return el.value; });
     if (ids.length < 4) { toast('A session needs at least 4 players.'); return; }
-    var counts = Engine.sessionCounts(session);
-    var meta = session.playerMeta || {};
-    // Late joiners are credited with the lightest current load, so they
-    // slot into the queue evenly instead of monopolizing the next games.
-    var effs = session.playerIds.map(function (id) {
-      return Engine.effectiveGames(session, counts, id);
-    });
-    var minEff = effs.length ? Math.min.apply(null, effs) : 0;
-    ids.forEach(function (id) {
-      if (session.playerIds.indexOf(id) < 0 && !meta[id]) {
-        meta[id] = { gamesCredit: minEff };
-      }
-    });
-    session.playerIds = ids;
-    session.playerMeta = meta;
+    // The engine credits newcomers with the lightest current load and clocks
+    // their wait from now, so they join the back of the line rather than
+    // jumping people who were already waiting.
+    Engine.setSessionPlayers(session, ids);
     var started = Engine.fillCourts(session, playersById());
     persist();
     closeModal();
@@ -728,7 +728,10 @@
         if (err) { toast(err); return; }
         if (!confirm('Replace ALL current data with the contents of "' + file.name + '"? This cannot be undone.')) return;
         DB = data;
-        DB.sessions.forEach(function (s) { Engine.migrateSession(s); });
+        DB.sessions.forEach(function (s) {
+          Engine.migrateSession(s);
+          Engine.normalizeSession(s);
+        });
         persist();
         renderAll();
         toast('Data imported.');

@@ -245,27 +245,33 @@
   }
 
   /*
-   * Validate a final score against USA Pickleball rules. A game is won by
-   * the first side to reach the target with a two-point margin; the margin
-   * is a hard rule, the target is the rec-play default and only warns, since
-   * some groups play short or timed games.
+   * Validate a final score against USA Pickleball rule 12.A for a game to 11.
+   * The first side to reach 11 with a two-point lead wins; tied at 10–10 or
+   * later, play continues until one side leads by exactly 2. So a finished
+   * game is always either 11 to 9-or-less, or a winner past 11 with the loser
+   * exactly 2 behind. Anything else is unfinished or mistyped, and refused.
    */
   function checkScore(a, b) {
     if (a === null || b === null || a === undefined || b === undefined || isNaN(a) || isNaN(b)) {
-      return { ok: false, error: 'Enter both scores.', warn: null };
+      return { ok: false, error: 'Enter both scores.' };
     }
-    if (a < 0 || b < 0) return { ok: false, error: 'Scores cannot be negative.', warn: null };
-    if (a === b) return { ok: false, error: 'Pickleball games cannot end in a tie.', warn: null };
+    if (a < 0 || b < 0) return { ok: false, error: 'Scores cannot be negative.' };
+    if (a === b) return { ok: false, error: 'Pickleball games cannot end in a tie.' };
     var hi = Math.max(a, b), lo = Math.min(a, b);
-    if (hi - lo < 2) {
-      return { ok: false, warn: null,
-        error: 'A game must be won by 2 points (USA Pickleball rules). ' + hi + '–' + lo + ' is not a finished game.' };
-    }
-    var result = { ok: true, error: null, warn: null };
     if (hi < GAME_TARGET) {
-      result.warn = 'Games are normally played to ' + GAME_TARGET + '. Save ' + hi + '–' + lo + ' anyway?';
+      return { ok: false,
+        error: 'Games are played to ' + GAME_TARGET + '. ' + hi + '–' + lo + ' is not a finished game.' };
     }
-    return result;
+    if (hi - lo < 2) {
+      return { ok: false,
+        error: 'A game must be won by 2 points. ' + hi + '–' + lo + ' is not a finished game.' };
+    }
+    if (hi > GAME_TARGET && hi - lo !== 2) {
+      return { ok: false,
+        error: 'Past ' + GAME_TARGET + ' a game ends as soon as one side leads by 2, so ' +
+          hi + '–' + lo + ' is not possible. Check the scores.' };
+    }
+    return { ok: true, error: null };
   }
 
   /* Start a game on every free court that has enough waiting players.

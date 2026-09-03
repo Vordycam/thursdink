@@ -589,12 +589,10 @@
   }
 
   /* USA Pickleball scoring rules live in the engine; this just surfaces them.
-     A margin under 2 is refused outright. A game that never reached 11 is
-     unusual but not impossible (short or timed play), so it asks first. */
+     The group plays to 11, win by 2, so anything else is refused outright. */
   function validScores(a, b) {
     var check = Engine.checkScore(a, b);
     if (!check.ok) { toast(check.error); return false; }
-    if (check.warn && !confirm(check.warn)) return false;
     return true;
   }
 

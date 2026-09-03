@@ -249,22 +249,33 @@ test('a marginal balance gain does not justify passing anyone over', () => {
 
 /* ── USA Pickleball scoring ───────────────────────────────────────────── */
 
-test('checkScore enforces win-by-two and warns under 11', () => {
+test('checkScore accepts exactly the scores a game to 11 can finish on', () => {
+  // Winner on 11, loser anywhere from 0 to 9.
   assert.equal(Engine.checkScore(11, 9).ok, true);
-  assert.equal(Engine.checkScore(11, 9).warn, null);
-  assert.equal(Engine.checkScore(15, 13).ok, true, 'games to 15 are fine');
-  assert.equal(Engine.checkScore(12, 10).ok, true, 'extended games are fine');
+  assert.equal(Engine.checkScore(11, 0).ok, true);
+  assert.equal(Engine.checkScore(0, 11).ok, true, 'order does not matter');
+  // Deuce: past 11 the loser is exactly 2 behind.
+  assert.equal(Engine.checkScore(12, 10).ok, true);
+  assert.equal(Engine.checkScore(15, 13).ok, true, 'a long deuce run from 10–10');
+});
+
+test('checkScore refuses unfinished games and impossible scores', () => {
+  const short = Engine.checkScore(7, 4);
+  assert.equal(short.ok, false, 'the group plays to 11 — a short game is not finished');
+  assert.match(short.error, /played to 11/);
 
   assert.equal(Engine.checkScore(11, 10).ok, false, 'one-point margin is not a finished game');
   assert.match(Engine.checkScore(11, 10).error, /won by 2/);
+
+  assert.equal(Engine.checkScore(13, 9).ok, false, 'would have ended 11–9');
+  assert.match(Engine.checkScore(13, 9).error, /not possible/);
+  assert.equal(Engine.checkScore(15, 12).ok, false, 'would have ended 14–12');
+  assert.equal(Engine.checkScore(13, 12).ok, false, 'past 11 with a 1-point lead is still in play');
+
   assert.equal(Engine.checkScore(11, 11).ok, false);
   assert.match(Engine.checkScore(11, 11).error, /tie/);
   assert.equal(Engine.checkScore(null, 5).ok, false);
   assert.equal(Engine.checkScore(-1, 11).ok, false);
-
-  const short = Engine.checkScore(7, 4);
-  assert.equal(short.ok, true, 'a short game is allowed');
-  assert.match(short.warn, /played to 11/, 'but asks first');
 });
 
 test('skill scale covers the full USA Pickleball range', () => {

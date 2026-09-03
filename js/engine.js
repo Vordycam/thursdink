@@ -1,7 +1,8 @@
 /* Engine: continuous fair rotation (per-court flow), Elo-style ratings, stats.
    Each court runs independently: as soon as its game is scored, the next game
-   starts from the waiting pool. Fairness balances games played and wait time;
-   team-making maximizes partner/opponent variety and competitive balance. */
+   starts from the waiting pool. Fairness is longest wait first, measured by
+   the clock; team-making maximizes partner/opponent variety and competitive
+   balance among players who have waited the same length of time. */
 (function () {
   'use strict';
 
@@ -16,11 +17,20 @@
      term keeps games competitive without overriding variety. */
   var RATING_WEIGHT = 0.1;
 
-  /* Choosing WHICH four play next: among players tied on games played, the
-     engine may look a little past strict wait order to avoid a bad game —
-     but passing over someone who has waited longer costs this much, so it
-     only happens when the alternative is clearly worse (a third repeat
-     partnership, a badly lopsided court). Fewer games always wins outright. */
+  /*
+   * Who plays next is decided by how long each person has been waiting.
+   * Players whose waits began within TIE_WINDOW_MS of each other are treated
+   * as having waited equally long — two courts finishing twenty seconds apart
+   * should not force the same four back on together when mixing the eight
+   * gives everyone a fresh game. Anyone who has waited longer than that
+   * window is locked in and can never be skipped.
+   *
+   * Within a tie, fewer games played goes first. The engine may then look a
+   * little past that order to avoid a bad court, but each person passed over
+   * costs LEAPFROG_PENALTY, so it only happens when the alternative is clearly
+   * worse (a third repeat partnership, a badly lopsided game).
+   */
+  var TIE_WINDOW_MS = 60 * 1000;
   var LEAPFROG_PENALTY = 60;
   var TIER_WINDOW = 2;
 
@@ -86,16 +96,6 @@
     return (counts.games[id] || 0) + ((meta[id] && meta[id].gamesCredit) || 0);
   }
 
-  function lastPlayedSeq(session, id) {
-    var last = 0;
-    (session.games || []).forEach(function (m) {
-      if (m.done && m.seq && (m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0)) {
-        last = Math.max(last, m.seq);
-      }
-    });
-    return last;
-  }
-
   /*
    * Cost of one court's grouping (4 players split into two teams).
    * Heavily penalize repeat partners, moderately penalize repeat opponents,
@@ -131,25 +131,41 @@
   }
 
   /*
-   * When a player's wait began, in game-sequence terms: the game they last
-   * finished, or the moment they joined if they have not played yet.
+   * The moment a player's current wait began, as a timestamp: when their
+   * last game was scored, when they arrived, or the start of the session —
+   * whichever is latest.
    *
-   * This is the fix for late joiners jumping the line. A player who had never
-   * played returned 0 here — read by the sort as "waiting since before game
-   * 1" — so anyone added mid-session went straight to the front, ahead of
-   * people who had genuinely been waiting for several games.
+   * Real clock time, not game numbers. With two courts, game 5 can finish
+   * after game 6 if it goes to a long deuce; its players sat down later and
+   * have waited less, and only a timestamp gets that right.
    */
-  function waitStart(session, id) {
+  function waitSince(session, id) {
+    var since = session.startedAt || 0;
     var meta = (session.playerMeta || {})[id];
-    var joined = (meta && meta.joinedSeq) || 0;
-    return Math.max(lastPlayedSeq(session, id), joined);
+    if (meta && meta.joinedAt) since = Math.max(since, meta.joinedAt);
+    (session.games || []).forEach(function (m) {
+      if (m.done && m.finishedAt && (m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0)) {
+        since = Math.max(since, m.finishedAt);
+      }
+    });
+    return since;
+  }
+
+  /* Record a final score. The timestamp is what the wait order runs on, so
+     it is set here and nowhere else — editing a score later must not touch it. */
+  function completeGame(game, scoreA, scoreB) {
+    game.scoreA = scoreA;
+    game.scoreB = scoreB;
+    game.done = true;
+    game.finishedAt = Date.now();
+    return game;
   }
 
   /*
    * Set the session's player list. Newcomers are credited with the lightest
-   * current load, so they cannot monopolise the next several games to "catch
-   * up", and their wait is clocked from now, so they cannot jump anyone who is
-   * already in line. Rejoining refreshes the clock but keeps earlier credit.
+   * current load (used only to break ties among equal waits) and their wait
+   * is clocked from now, so they join the back of the line. Rejoining
+   * restarts the clock but keeps any earlier credit.
    */
   function setSessionPlayers(session, ids) {
     var counts = sessionCounts(session);
@@ -159,13 +175,13 @@
     ids.forEach(function (id) {
       if (session.playerIds.indexOf(id) >= 0) return;
       if (!meta[id]) meta[id] = { gamesCredit: minEff };
-      meta[id].joinedSeq = session.nextSeq || 1;
+      meta[id].joinedAt = Date.now();
     });
     session.playerIds = ids;
   }
 
-  /* Waiting players in the order they are entitled to play: fewest games
-     first, then longest wait. `randomize` breaks exact ties by chance (used
+  /* Waiting players in the order they are entitled to play: longest wait
+     first, then fewest games. `randomize` breaks exact ties by chance (used
      when actually picking a game); otherwise roster order keeps the displayed
      list from shuffling between renders. */
   function rankPool(session, playersById, randomize) {
@@ -173,17 +189,40 @@
     var counts = sessionCounts(session);
     var order = randomize ? shuffle(pool) : pool;
     var scored = order.map(function (id) {
-      return { id: id, eff: effectiveGames(session, counts, id), wait: waitStart(session, id) };
+      return { id: id, eff: effectiveGames(session, counts, id), since: waitSince(session, id) };
     });
     scored.sort(function (a, b) {
-      if (a.eff !== b.eff) return a.eff - b.eff;
-      return a.wait - b.wait;
+      if (a.since !== b.since) return a.since - b.since;
+      return a.eff - b.eff;
     });
     return { scored: scored, counts: counts };
   }
 
   function queueOrder(session, playersById) {
     return rankPool(session, playersById, false).scored;
+  }
+
+  /*
+   * Colour bands for a waiting list already in queue order. People whose
+   * waits began within TIE_WINDOW_MS of each other share a band — a whole
+   * court's worth of players who finished together is one group. The group
+   * that has waited longest is red, the most recent to sit down or arrive is
+   * green, anything between is yellow. One group means everyone is red: they
+   * have all waited equally and are all up next.
+   */
+  function waitBands(queue) {
+    var groups = [];
+    queue.forEach(function (q) {
+      var g = groups[groups.length - 1];
+      if (g && q.since - g.since <= TIE_WINDOW_MS) g.count++;
+      else groups.push({ since: q.since, count: 1 });
+    });
+    var bands = [];
+    groups.forEach(function (g, gi) {
+      var band = gi === 0 ? 'red' : gi === groups.length - 1 ? 'green' : 'yellow';
+      for (var i = 0; i < g.count; i++) bands.push(band);
+    });
+    return bands;
   }
 
   /* All k-sized subsets of a short list. Bounded by TIER_WINDOW, so at most
@@ -201,15 +240,21 @@
     return out;
   }
 
+  /* Is `other` more entitled to play than `chosen` within one tie tier? */
+  function outranks(other, chosen) {
+    if (other.eff !== chosen.eff) return other.eff < chosen.eff;
+    return other.since < chosen.since;
+  }
+
   /*
    * Pick the next 4 players for a free court.
    *
-   * Fairness is the hard constraint: anyone with strictly fewer games than
-   * the fourth-ranked player is locked in and can never be skipped. Only
-   * among players TIED on games played does the engine look a little past
-   * strict wait order, and each player passed over costs LEAPFROG_PENALTY —
-   * so a longer-waiting player is only stepped over when the alternative
-   * game is clearly worse, never for a marginal gain.
+   * Longest wait is the hard constraint. Anyone whose wait began more than
+   * TIE_WINDOW_MS before the fourth-ranked player's is locked in and cannot
+   * be skipped. Everyone within the window of that fourth player forms a
+   * tie; among them, fewer games goes first, and the engine may look up to
+   * TIER_WINDOW places past that to avoid a clearly worse court, paying
+   * LEAPFROG_PENALTY for each person it passes over.
    */
   function nextGame(session, playersById) {
     var ranked = rankPool(session, playersById, true);
@@ -220,11 +265,15 @@
       return (playersById[id] && playersById[id].rating) || 1250;
     }
 
-    var cutoff = scored[3].eff;
+    var pivot = scored[3].since;
     var locked = [], tier = [];
     scored.forEach(function (s) {
-      if (s.eff < cutoff) locked.push(s);
-      else if (s.eff === cutoff) tier.push(s);
+      if (s.since < pivot - TIE_WINDOW_MS) locked.push(s);
+      else if (s.since <= pivot + TIE_WINDOW_MS) tier.push(s);
+    });
+    tier.sort(function (a, b) {
+      if (a.eff !== b.eff) return a.eff - b.eff;
+      return a.since - b.since;
     });
     var need = 4 - locked.length;
     var candidates = tier.slice(0, need + TIER_WINDOW);
@@ -236,7 +285,7 @@
       var cost = split.cost;
       pick.forEach(function (chosen) {
         candidates.forEach(function (other) {
-          if (pick.indexOf(other) < 0 && other.wait < chosen.wait) cost += LEAPFROG_PENALTY;
+          if (pick.indexOf(other) < 0 && outranks(other, chosen)) cost += LEAPFROG_PENALTY;
         });
       });
       if (cost < bestCost) { bestCost = cost; best = split; }
@@ -292,6 +341,7 @@
         scoreA: null,
         scoreB: null,
         done: false,
+        finishedAt: null,
         ratingDeltas: null
       };
       session.games.push(game);
@@ -324,21 +374,38 @@
   }
 
   /*
-   * One-time repair for sessions that are already running when this fix
-   * ships. A player checked in under the old app has gamesCredit but no
-   * joinedSeq, so their wait would still read as "since game 0" and they
-   * would jump the line once more. Stamp them as joining now: back of their
-   * tier once, then they progress normally. Only late joiners ever have a
-   * meta entry, so original players are untouched. Returns whether anything
-   * changed, so the caller knows to save.
+   * One-time repair for a session that is already running when an update
+   * ships. Games scored before timestamps existed get a synthetic finishedAt
+   * a few milliseconds after the session start, in sequence order — earlier
+   * than any game scored from now on, which is correct: those players did
+   * become available first. Late joiners recorded without joinedAt get one on
+   * the same synthetic scale. Returns whether anything changed, so the caller
+   * knows to save.
    */
   function normalizeSession(session) {
     if (session.status !== 'active') return false;
-    var meta = session.playerMeta || {};
+    var base = session.startedAt || 0;
     var changed = false;
+
+    (session.games || []).forEach(function (m) {
+      if (m.done && !m.finishedAt) {
+        m.finishedAt = base + (m.seq || 0);
+        changed = true;
+      }
+    });
+
+    // A joiner with no recorded arrival time is assumed to have arrived just
+    // after the most recent finished game. Anything earlier could rank them
+    // ahead of people already waiting — the very bug this app was fixed for.
+    var latest = base;
+    (session.games || []).forEach(function (m) {
+      if (m.done && m.finishedAt) latest = Math.max(latest, m.finishedAt);
+    });
+    var meta = session.playerMeta || {};
     Object.keys(meta).forEach(function (id) {
-      if (meta[id] && meta[id].joinedSeq === undefined) {
-        meta[id].joinedSeq = session.nextSeq || 1;
+      if (meta[id] && !meta[id].joinedAt) {
+        var bySeq = base + (meta[id].joinedSeq || session.nextSeq || 1);
+        meta[id].joinedAt = Math.max(bySeq, latest + 1);
         changed = true;
       }
     });
@@ -375,7 +442,9 @@
     });
   }
 
-  /* Aggregate W/L/points stats from completed matches. */
+  /* Aggregate W/L/points stats from completed matches. Anyone who finished
+     a game is included, whether or not they are still in the session — a
+     player who left early still played. */
   function computeStats(sessions) {
     var stats = {}; // id -> {games, wins, losses, pf, pa}
     function ensure(id) {
@@ -401,6 +470,18 @@
     return stats;
   }
 
+  /* Everyone who was part of a session: still checked in, or finished a game
+     before leaving. Used for the "N players" figure and the standings. */
+  function sessionParticipants(session) {
+    var seen = {};
+    (session.playerIds || []).forEach(function (id) { seen[id] = true; });
+    sessionMatches(session).forEach(function (m) {
+      if (!m.done) return;
+      m.teamA.concat(m.teamB).forEach(function (id) { seen[id] = true; });
+    });
+    return Object.keys(seen);
+  }
+
   window.Engine = {
     initialRating: initialRating,
     sessionMatches: sessionMatches,
@@ -408,7 +489,9 @@
     waitingPool: waitingPool,
     sessionCounts: sessionCounts,
     effectiveGames: effectiveGames,
-    waitStart: waitStart,
+    waitSince: waitSince,
+    waitBands: waitBands,
+    completeGame: completeGame,
     setSessionPlayers: setSessionPlayers,
     queueOrder: queueOrder,
     fillCourts: fillCourts,
@@ -418,7 +501,9 @@
     computeRatingDeltas: computeRatingDeltas,
     applyDeltas: applyDeltas,
     computeStats: computeStats,
+    sessionParticipants: sessionParticipants,
     GAME_TARGET: GAME_TARGET,
+    TIE_WINDOW_MS: TIE_WINDOW_MS,
     SKILL_LEVELS: ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']
   };
 })();

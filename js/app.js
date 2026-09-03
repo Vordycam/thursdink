@@ -11,7 +11,7 @@
     var changed = false;
     DB.sessions.forEach(function (s) {
       if (Engine.migrateSession(s)) changed = true;
-      // late joiners added before joinedSeq existed get their wait clocked now
+      // repair timestamps for a session that was running when the app updated
       if (Engine.normalizeSession(s)) changed = true;
       // fill any court left free (e.g. right after migration)
       if (s.status === 'active' && Engine.fillCourts(s, byId).length) changed = true;
@@ -194,18 +194,24 @@
     html += '</div>';
 
     if (pool.length) {
-      // Shown in the order people are entitled to play, so anyone can see
-      // where they stand and that a newcomer has joined the back of the line.
+      // Longest wait first. Each chip carries its own clock and a colour for
+      // where it sits: red fills the next court, yellow the one after, green
+      // just sat down or just arrived.
       var queue = Engine.queueOrder(session, byId);
-      html += '<div class="sitouts"><span class="sitout-label">Waiting to play, in order:</span> ' +
+      var bands = Engine.waitBands(queue);
+      html += '<div class="sitouts"><span class="sitout-label">Waiting to play, longest wait first:</span> ' +
         queue.map(function (q, i) {
-          return '<span class="chip' + (i < 4 ? ' chip-next' : '') + '">' +
+          return '<span class="chip chip-' + bands[i] + '" data-since="' + q.since + '">' +
             '<span class="muted">' + (i + 1) + '.</span> ' +
             esc(byId[q.id] ? byId[q.id].name : '?') +
+            ' <span class="wait-time">' + fmtWait(Date.now() - q.since) + '</span>' +
             ' <span class="muted">(' + (counts.games[q.id] || 0) + ')</span></span>';
         }).join(' ') +
-        '<div class="muted small-note">Number in brackets = games played. Fewest games go first, then whoever has waited longest. ' +
-        'Someone who joins late starts at the back of their group.</div></div>';
+        '<div class="muted small-note">' +
+        '<span class="legend legend-red">Red</span> waited longest &middot; ' +
+        '<span class="legend legend-yellow">Yellow</span> next &middot; ' +
+        '<span class="legend legend-green">Green</span> most recent to sit down or arrive. ' +
+        'Time = how long they have been waiting; brackets = games played.</div></div>';
     }
 
     if (finished.length) {
@@ -215,8 +221,10 @@
         '</div></details>';
     }
 
+    // Everyone who finished a game this session, including anyone who has
+    // since left. Restricting to playerIds dropped early leavers' results.
     var stats = Engine.computeStats([session]);
-    var rows = leaderboardRows(stats, byId, session.playerIds);
+    var rows = leaderboardRows(stats, byId, null);
     if (rows.trim()) {
       html += '<div class="card"><h3>Session standings</h3>' + leaderboardTable(rows) + '</div>';
     }
@@ -314,7 +322,7 @@
     var sessionsHtml = DB.sessions.slice().reverse().map(function (s) {
       return '<div class="player-row" data-action="session-detail" data-session="' + s.id + '">' +
         '<div class="player-main"><strong>' + fmtDate(s.startedAt) + '</strong>' +
-        '<span class="muted">' + s.playerIds.length + ' players &middot; ' +
+        '<span class="muted">' + Engine.sessionParticipants(s).length + ' players &middot; ' +
         countDoneGames(s) + ' games' + (s.status === 'active' ? ' &middot; in progress' : '') + '</span></div>' +
         '<span class="chev">&rsaquo;</span></div>';
     }).join('');
@@ -396,10 +404,10 @@
     if (!sess) return;
     var byId = playersById();
     var stats = Engine.computeStats([sess]);
-    var rows = leaderboardRows(stats, byId, sess.playerIds);
+    var rows = leaderboardRows(stats, byId, null);   // includes players who left early
     openModal(
       '<h2>' + fmtDate(sess.startedAt) + '</h2>' +
-      '<p class="muted">' + sess.playerIds.length + ' players &middot; ' + countDoneGames(sess) + ' games' +
+      '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       (rows.trim() ? leaderboardTable(rows) : '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
@@ -604,9 +612,7 @@
     var a = collectScore(matchId, 'A');
     var b = collectScore(matchId, 'B');
     if (!validScores(a, b)) return;
-    m.scoreA = a;
-    m.scoreB = b;
-    m.done = true;
+    Engine.completeGame(m, a, b);   // also stamps finishedAt, which the wait order runs on
     var byId = playersById();
     m.ratingDeltas = Engine.computeRatingDeltas(m, byId);
     Engine.applyDeltas(m.ratingDeltas, byId, 1);
@@ -823,6 +829,25 @@
   document.querySelectorAll('.tab-btn').forEach(function (b) {
     b.addEventListener('click', function () { setTab(b.getAttribute('data-tab')); });
   });
+
+  /* "12m", "1h 05m", or "now" for a wait under a minute. */
+  function fmtWait(ms) {
+    var m = Math.max(0, Math.floor(ms / 60000));
+    if (m < 1) return 'now';
+    if (m < 60) return m + 'm';
+    return Math.floor(m / 60) + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+  }
+
+  /* Keep the waiting-list clocks moving without re-rendering the view —
+     a full render would wipe any score someone is mid-way through typing. */
+  function tickWaitTimers() {
+    var now = Date.now();
+    document.querySelectorAll('.chip[data-since]').forEach(function (chip) {
+      var el = chip.querySelector('.wait-time');
+      if (el) el.textContent = fmtWait(now - parseInt(chip.getAttribute('data-since'), 10));
+    });
+  }
+  setInterval(tickWaitTimers, 15000);
 
   function renderAll() {
     renderPlay();

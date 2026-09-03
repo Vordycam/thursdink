@@ -161,8 +161,16 @@ main { max-width: 760px; margin: 0 auto; padding: 14px 12px 90px; }
   display: inline-block; background: #fff; border: 1px solid var(--line);
   border-radius: 999px; padding: 3px 10px; margin: 2px; font-weight: 600; font-size: .9rem;
 }
-/* The next four in line — the group that fills the next free court. */
-.chip-next { border-color: #e5cd8a; background: #fffdf5; }
+/* Waiting-list bands. A coloured left edge plus tint, so the band reads even
+   for colour-blind players who can compare edge thickness against the rest. */
+.chip-red    { border-color: #fca5a5; border-left: 5px solid var(--danger); background: #fee2e2; }
+.chip-yellow { border-color: #fde047; border-left: 5px solid var(--ball);   background: #fef9c3; }
+.chip-green  { border-color: #86efac; border-left: 5px solid var(--win);    background: #dcfce7; }
+.wait-time { font-weight: 700; font-variant-numeric: tabular-nums; }
+.legend { font-weight: 700; padding: 0 4px; border-radius: 4px; }
+.legend-red    { background: #fee2e2; color: var(--danger); }
+.legend-yellow { background: #fef9c3; color: #854d0e; }
+.legend-green  { background: #dcfce7; color: var(--win); }
 
 /* ---------- Players ---------- */
 .add-player-form { display: flex; gap: 8px; flex-wrap: wrap; }

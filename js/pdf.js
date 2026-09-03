@@ -165,10 +165,11 @@
         var games = 0;
         Engine.sessionMatches(sess).forEach(function (m) { if (m.done) games++; });
         doc.ensure(70);
-        doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + sess.playerIds.length + ' players, ' +
+        // Count and list everyone who played, including anyone who left early.
+        doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + Engine.sessionParticipants(sess).length + ' players, ' +
           games + ' games' + (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
         doc.space(2);
-        writeLeaderboard(doc, leaderboardList(Engine.computeStats([sess]), byId, sess.playerIds));
+        writeLeaderboard(doc, leaderboardList(Engine.computeStats([sess]), byId, null));
         doc.space(8);
       });
     }

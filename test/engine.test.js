@@ -346,6 +346,100 @@ test('a player who left early is still in the session results', () => {
   assert.deepEqual(who, ['A', 'B', 'C', 'D', 'E'], 'the session counts everyone who was part of it');
 });
 
+/* ── standings ────────────────────────────────────────────────────────── */
+
+function statsOf(table) {
+  // { Name: [games, wins, losses, pf, pa] } -> Engine.computeStats shape
+  const out = {};
+  Object.keys(table).forEach((id) => {
+    const [games, wins, losses, pf, pa] = table[id];
+    out[id] = { games, wins, losses, pf, pa };
+  });
+  return out;
+}
+
+test('standings: most wins takes the board, not the best percentage', () => {
+  // The reported problem: a 1-0 night sat above 7-1. And a 4-0 must not
+  // outrank 7-1 either - wins decide, percentage only breaks ties.
+  const byId = players(['Ace', 'Bea', 'Cal', 'Dee']);
+  const stats = statsOf({
+    Ace: [8, 7, 1, 88, 60],
+    Bea: [4, 4, 0, 44, 20],
+    Cal: [8, 4, 4, 80, 78],
+    Dee: [1, 1, 0, 11, 3],
+  });
+  const b = Engine.rankStandings(stats, byId);
+  assert.equal(b.maxGames, 8);
+  assert.equal(b.minGames, 4, 'half of the busiest player');
+  assert.deepEqual(b.ranked.map((r) => r.id), ['Ace', 'Bea', 'Cal'], '7 wins, then 4 wins at 100%, then 4 wins at 50%');
+  assert.deepEqual(b.ranked.map((r) => r.rank), [1, 2, 3]);
+  assert.deepEqual(b.mentions.map((r) => r.id), ['Dee'], 'one game is under the threshold');
+});
+
+test('standings: ties on wins fall to win rate, point difference, then name', () => {
+  const byId = players(['Zed', 'Amy', 'Bob']);
+  const stats = statsOf({
+    Zed: [6, 4, 2, 66, 50],   // 4 wins, 67%, +16
+    Amy: [8, 4, 4, 88, 70],   // 4 wins, 50%, +18
+    Bob: [6, 4, 2, 66, 50],   // identical to Zed
+  });
+  const b = Engine.rankStandings(stats, byId);
+  assert.deepEqual(b.ranked.map((r) => r.id), ['Bob', 'Zed', 'Amy'],
+    'Bob and Zed tie on everything and fall to name; Amy has the lower rate');
+});
+
+test('standings: everyone ranks while the session is young', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  const stats = statsOf({ A: [1, 1, 0, 11, 4], B: [1, 1, 0, 11, 4], C: [1, 0, 1, 4, 11], D: [1, 0, 1, 4, 11] });
+  const b = Engine.rankStandings(stats, byId);
+  assert.equal(b.minGames, 1);
+  assert.equal(b.ranked.length, 4);
+  assert.equal(b.mentions.length, 0);
+});
+
+test('standings: undefeated but under the threshold is a special mention, not the champion', () => {
+  const byId = players(['Vet', 'New']);
+  const stats = statsOf({ Vet: [8, 7, 1, 88, 60], New: [3, 3, 0, 33, 15] });
+  const b = Engine.rankStandings(stats, byId);
+  assert.deepEqual(b.ranked.map((r) => r.id), ['Vet']);
+  assert.deepEqual(b.mentions.map((r) => r.id), ['New']);
+  assert.match(b.mentions[0].note, /Unbeaten, 3-0 in 3 games/);
+});
+
+test('standings: every row carries a note, podium notes are fixed, and all notes are PDF-safe', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+  const stats = statsOf({
+    A: [8, 7, 1, 88, 60], B: [8, 6, 2, 80, 62], C: [8, 5, 3, 75, 70],
+    D: [8, 4, 4, 70, 70], E: [8, 2, 6, 55, 80], F: [8, 0, 8, 30, 88], G: [2, 1, 1, 15, 15],
+  });
+  const b = Engine.rankStandings(stats, byId);
+  assert.match(b.ranked[0].note, /^Top of the board/);
+  assert.match(b.ranked[1].note, /^Runner-up/);
+  assert.match(b.ranked[2].note, /^Podium/);
+  b.ranked.concat(b.mentions).forEach((r) => {
+    assert.ok(r.note.length > 10, `${r.id} has a note`);
+    assert.ok([...r.note].every((ch) => ch.charCodeAt(0) < 128), `${r.id} note is ASCII: ${r.note}`);
+  });
+  // Bottom of the board still gets an encouraging line, not silence.
+  assert.match(b.ranked[b.ranked.length - 1].note, /See you Thursday/);
+});
+
+test('standings: same input, same output - screen and PDF cannot disagree', () => {
+  const byId = players(['A', 'B', 'C']);
+  const stats = statsOf({ A: [5, 3, 2, 50, 45], B: [5, 3, 2, 50, 45], C: [5, 2, 3, 45, 50] });
+  const one = JSON.stringify(Engine.rankStandings(stats, byId));
+  const two = JSON.stringify(Engine.rankStandings(stats, byId));
+  assert.equal(one, two);
+});
+
+test('standings: unknown players and zero-game entries are left out', () => {
+  const byId = players(['A']);
+  const stats = statsOf({ A: [3, 2, 1, 30, 25], Ghost: [4, 4, 0, 44, 10], Z: [0, 0, 0, 0, 0] });
+  const b = Engine.rankStandings(stats, byId);
+  assert.deepEqual(b.ranked.map((r) => r.id), ['A']);
+  assert.equal(b.mentions.length, 0);
+});
+
 /* ── USA Pickleball scoring ───────────────────────────────────────────── */
 
 test('checkScore accepts exactly the scores a game to 11 can finish on', () => {

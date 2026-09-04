@@ -172,6 +172,16 @@ main { max-width: 760px; margin: 0 auto; padding: 14px 12px 90px; }
 .legend-yellow { background: #fef9c3; color: #854d0e; }
 .legend-green  { background: #dcfce7; color: var(--win); }
 
+/* ---------- Standings: notes, podium, special mentions ---------- */
+.lb-note { display: block; font-size: .78rem; font-weight: 400; color: var(--muted); margin-top: 2px; line-height: 1.3; }
+table.lb tr.podium-1 td:first-child { color: var(--accent); font-weight: 800; }
+table.lb tr.podium-2 td:first-child,
+table.lb tr.podium-3 td:first-child { color: var(--green); font-weight: 800; }
+.mentions { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--line); }
+.mentions h4 { margin: 0 0 2px; font-size: .95rem; }
+.mention { padding: 8px 6px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.mention:hover { background: var(--bg); }
+
 /* ---------- Players ---------- */
 .add-player-form { display: flex; gap: 8px; flex-wrap: wrap; }
 .add-player-form input[type="text"] {

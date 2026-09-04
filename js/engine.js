@@ -482,6 +482,79 @@
     return Object.keys(seen);
   }
 
+  /*
+   * Standings. Two lists: the board, and special mentions.
+   *
+   * Ranking by win percentage let a 1-0 night sit above a 7-1 one. The
+   * board is now ranked by WINS - then win rate, then point difference, then
+   * games - so playing more and winning more is what climbs it. To rank at
+   * all a player needs at least half as many games as the busiest player;
+   * anyone under that is listed under special mentions with their record,
+   * so a 3-0 late arrival is celebrated rather than either crowned or
+   * dropped. Ties fall through to name so screen and PDF agree exactly.
+   *
+   * Notes are deterministic and ASCII only - the PDF writer cannot print
+   * anything outside Latin-1.
+   */
+  function boardNote(r, index, maxGames) {
+    if (index === 0) return 'Top of the board - the most wins on the night.';
+    if (index === 1) return 'Runner-up. One more win and it is yours.';
+    if (index === 2) return 'Podium finish. Well played.';
+    if (r.losses === 0) return 'Unbeaten. Nobody found a way through.';
+    // Winless comes before the volume compliment: an 0-8 night should get the
+    // honest, encouraging line, not be told they played the most.
+    if (r.wins === 0) return 'Tough night on the scoreline - showing up is how it turns. See you Thursday.';
+    if (r.games === maxGames) return 'Most games played. Every court needs someone like that.';
+    if (r.pct >= 0.6) return 'Winning more than you lose. Keep it rolling.';
+    if (r.pct >= 0.4) return 'Right in the mix - a point here or there decides these.';
+    return 'Wins on the board. Every game sharpens the next one.';
+  }
+
+  function mentionNote(r) {
+    var rec = r.wins + '-' + r.losses + ' in ' + r.games + (r.games === 1 ? ' game' : ' games');
+    if (r.losses === 0) return 'Unbeaten, ' + rec + '. A few more games and the podium is yours to take.';
+    if (r.pct >= 0.5) return rec + '. Good numbers - play more and they count for the board.';
+    return rec + '. Come back for more games and a run at the board.';
+  }
+
+  function rankStandings(stats, playersById, restrictIds) {
+    var ids = restrictIds || Object.keys(stats);
+    var rows = ids.filter(function (id) {
+      return stats[id] && playersById[id] && stats[id].games > 0;
+    }).map(function (id) {
+      var s = stats[id];
+      return {
+        id: id, name: playersById[id].name, rating: playersById[id].rating,
+        games: s.games, wins: s.wins, losses: s.losses,
+        pct: s.wins / s.games, diff: s.pf - s.pa, rank: 0, note: ''
+      };
+    });
+
+    var maxGames = rows.reduce(function (m, r) { return Math.max(m, r.games); }, 0);
+    var minGames = Math.max(1, Math.ceil(maxGames / 2));
+
+    var ranked = rows.filter(function (r) { return r.games >= minGames; });
+    ranked.sort(function (a, b) {
+      if (b.wins !== a.wins) return b.wins - a.wins;
+      if (b.pct !== a.pct) return b.pct - a.pct;
+      if (b.diff !== a.diff) return b.diff - a.diff;
+      if (b.games !== a.games) return b.games - a.games;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
+    ranked.forEach(function (r, i) { r.rank = i + 1; r.note = boardNote(r, i, maxGames); });
+
+    var mentions = rows.filter(function (r) { return r.games < minGames; });
+    mentions.sort(function (a, b) {
+      if (b.pct !== a.pct) return b.pct - a.pct;
+      if (b.wins !== a.wins) return b.wins - a.wins;
+      if (b.diff !== a.diff) return b.diff - a.diff;
+      return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+    });
+    mentions.forEach(function (r) { r.note = mentionNote(r); });
+
+    return { ranked: ranked, mentions: mentions, minGames: minGames, maxGames: maxGames };
+  }
+
   window.Engine = {
     initialRating: initialRating,
     sessionMatches: sessionMatches,
@@ -502,6 +575,7 @@
     applyDeltas: applyDeltas,
     computeStats: computeStats,
     sessionParticipants: sessionParticipants,
+    rankStandings: rankStandings,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,
     SKILL_LEVELS: ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']

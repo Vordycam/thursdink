@@ -99,41 +99,53 @@
     return new Date(ts).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
   }
 
-  function leaderboardList(stats, byId, restrictIds) {
-    var ids = restrictIds || Object.keys(stats);
-    var list = ids.filter(function (id) { return stats[id] && byId[id]; }).map(function (id) {
-      var s = stats[id];
-      return {
-        name: byId[id].name, rating: byId[id].rating,
-        games: s.games, wins: s.wins, losses: s.losses,
-        pct: s.games ? s.wins / s.games : 0, diff: s.pf - s.pa
-      };
-    });
-    list.sort(function (a, b) {
-      if (b.pct !== a.pct) return b.pct - a.pct;
-      if (b.wins !== a.wins) return b.wins - a.wins;
-      return b.diff - a.diff;
-    });
-    return list;
-  }
-
-  function writeLeaderboard(doc, list) {
-    doc.ensure(40);
-    doc.row([
-      { x: LB_COLS.rank, t: '#' }, { x: LB_COLS.name, t: 'Player' }, { x: LB_COLS.gp, t: 'GP' },
-      { x: LB_COLS.w, t: 'W' }, { x: LB_COLS.l, t: 'L' }, { x: LB_COLS.pct, t: 'Win%' },
-      { x: LB_COLS.diff, t: '+/-' }, { x: LB_COLS.rating, t: 'Rating' }
-    ], 10, true);
-    list.forEach(function (r, i) {
-      doc.ensure(20);
+  /* The board and special mentions, ranked by Engine.rankStandings so the
+     printout matches the screen exactly. Each row carries its note beneath. */
+  function writeStandings(doc, board) {
+    if (board.ranked.length) {
+      doc.ensure(40);
       doc.row([
-        { x: LB_COLS.rank, t: String(i + 1) }, { x: LB_COLS.name, t: r.name }, { x: LB_COLS.gp, t: String(r.games) },
-        { x: LB_COLS.w, t: String(r.wins) }, { x: LB_COLS.l, t: String(r.losses) },
-        { x: LB_COLS.pct, t: Math.round(r.pct * 100) + '%' },
-        { x: LB_COLS.diff, t: (r.diff > 0 ? '+' : '') + r.diff },
-        { x: LB_COLS.rating, t: String(r.rating) }
-      ], 10, false);
-    });
+        { x: LB_COLS.rank, t: '#' }, { x: LB_COLS.name, t: 'Player' }, { x: LB_COLS.gp, t: 'GP' },
+        { x: LB_COLS.w, t: 'W' }, { x: LB_COLS.l, t: 'L' }, { x: LB_COLS.pct, t: 'Win%' },
+        { x: LB_COLS.diff, t: '+/-' }, { x: LB_COLS.rating, t: 'Rating' }
+      ], 10, true);
+      board.ranked.forEach(function (r) {
+        doc.ensure(32);
+        doc.row([
+          { x: LB_COLS.rank, t: String(r.rank) }, { x: LB_COLS.name, t: r.name }, { x: LB_COLS.gp, t: String(r.games) },
+          { x: LB_COLS.w, t: String(r.wins) }, { x: LB_COLS.l, t: String(r.losses) },
+          { x: LB_COLS.pct, t: Math.round(r.pct * 100) + '%' },
+          { x: LB_COLS.diff, t: (r.diff > 0 ? '+' : '') + r.diff },
+          { x: LB_COLS.rating, t: String(r.rating) }
+        ], 10, r.rank <= 3);
+        doc.y += 3;
+        doc.text(LB_COLS.name, r.note, 8, false);
+      });
+      doc.space(2);
+      doc.text(MARGIN, 'Ranked by wins, then win rate, then point difference.' +
+        (board.minGames > 1
+          ? ' Minimum ' + board.minGames + ' games to rank - half of the ' + board.maxGames + ' the busiest player had.'
+          : ''), 8, false);
+    }
+
+    if (board.mentions.length) {
+      doc.ensure(40);
+      doc.space(4);
+      doc.text(MARGIN, 'Special mentions', 11, true);
+      doc.text(MARGIN, 'Fewer than ' + board.minGames + ' games, so not ranked - but not forgotten.', 8, false);
+      board.mentions.forEach(function (r) {
+        doc.ensure(30);
+        doc.row([
+          { x: LB_COLS.name, t: r.name }, { x: LB_COLS.gp, t: String(r.games) },
+          { x: LB_COLS.w, t: String(r.wins) }, { x: LB_COLS.l, t: String(r.losses) },
+          { x: LB_COLS.pct, t: Math.round(r.pct * 100) + '%' },
+          { x: LB_COLS.diff, t: (r.diff > 0 ? '+' : '') + r.diff },
+          { x: LB_COLS.rating, t: String(r.rating) }
+        ], 10, false);
+        doc.y += 3;
+        doc.text(LB_COLS.name, r.note, 8, false);
+      });
+    }
   }
 
   function download(db) {
@@ -148,9 +160,8 @@
 
     doc.text(MARGIN, 'All-time leaderboard', 14, true);
     doc.space(4);
-    var allStats = Engine.computeStats(db.sessions);
-    var allList = leaderboardList(allStats, byId);
-    if (allList.length) writeLeaderboard(doc, allList);
+    var allBoard = Engine.rankStandings(Engine.computeStats(db.sessions), byId);
+    if (allBoard.ranked.length || allBoard.mentions.length) writeStandings(doc, allBoard);
     else doc.text(MARGIN, 'No games recorded yet.', 10, false);
 
     var done = db.sessions.filter(function (s) {
@@ -169,7 +180,7 @@
         doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + Engine.sessionParticipants(sess).length + ' players, ' +
           games + ' games' + (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
         doc.space(2);
-        writeLeaderboard(doc, leaderboardList(Engine.computeStats([sess]), byId, null));
+        writeStandings(doc, Engine.rankStandings(Engine.computeStats([sess]), byId, null));
         doc.space(8);
       });
     }

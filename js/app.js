@@ -224,44 +224,55 @@
     // Everyone who finished a game this session, including anyone who has
     // since left. Restricting to playerIds dropped early leavers' results.
     var stats = Engine.computeStats([session]);
-    var rows = leaderboardRows(stats, byId, null);
-    if (rows.trim()) {
-      html += '<div class="card"><h3>Session standings</h3>' + leaderboardTable(rows) + '</div>';
+    var board = leaderboardHtml(stats, byId, null);
+    if (board) {
+      html += '<div class="card"><h3>Session standings</h3>' + board + '</div>';
     }
     return html;
   }
 
   /* ---------- Leaderboards ---------- */
 
-  function leaderboardRows(stats, byId, restrictIds) {
-    var ids = restrictIds || Object.keys(stats);
-    var list = ids.filter(function (id) { return stats[id] && byId[id]; }).map(function (id) {
-      var s = stats[id];
-      return {
-        id: id, name: byId[id].name, rating: byId[id].rating,
-        games: s.games, wins: s.wins, losses: s.losses,
-        pct: s.games ? s.wins / s.games : 0, diff: s.pf - s.pa
-      };
-    });
-    list.sort(function (a, b) {
-      if (b.pct !== a.pct) return b.pct - a.pct;
-      if (b.wins !== a.wins) return b.wins - a.wins;
-      return b.diff - a.diff;
-    });
-    return list.map(function (r, i) {
-      return '<tr data-action="player-detail" data-player="' + r.id + '">' +
-        '<td>' + (i + 1) + '</td><td class="td-name">' + esc(r.name) + '</td>' +
-        '<td>' + r.games + '</td><td>' + r.wins + '</td><td>' + r.losses + '</td>' +
-        '<td>' + Math.round(r.pct * 100) + '%</td>' +
-        '<td>' + (r.diff > 0 ? '+' : '') + r.diff + '</td>' +
-        '<td>' + r.rating + '</td></tr>';
-    }).join('');
-  }
+  /* The board plus special mentions, ranked by the engine so this and the PDF
+     can never disagree. Returns '' when there is nothing to show. */
+  function leaderboardHtml(stats, byId, restrictIds) {
+    var board = Engine.rankStandings(stats, byId, restrictIds);
+    if (!board.ranked.length && !board.mentions.length) return '';
+    var html = '';
 
-  function leaderboardTable(rowsHtml) {
-    return '<div class="table-wrap"><table class="lb">' +
-      '<thead><tr><th>#</th><th>Player</th><th>GP</th><th>W</th><th>L</th><th>Win%</th><th>+/&minus;</th><th>Rating</th></tr></thead>' +
-      '<tbody>' + rowsHtml + '</tbody></table></div>';
+    if (board.ranked.length) {
+      html += '<div class="table-wrap"><table class="lb">' +
+        '<thead><tr><th>#</th><th>Player</th><th>GP</th><th>W</th><th>L</th><th>Win%</th><th>+/&minus;</th><th>Rating</th></tr></thead>' +
+        '<tbody>' +
+        board.ranked.map(function (r) {
+          return '<tr class="' + (r.rank <= 3 ? 'podium-' + r.rank : '') + '" data-action="player-detail" data-player="' + r.id + '">' +
+            '<td>' + r.rank + '</td>' +
+            '<td class="td-name">' + esc(r.name) + '<span class="lb-note">' + esc(r.note) + '</span></td>' +
+            '<td>' + r.games + '</td><td>' + r.wins + '</td><td>' + r.losses + '</td>' +
+            '<td>' + Math.round(r.pct * 100) + '%</td>' +
+            '<td>' + (r.diff > 0 ? '+' : '') + r.diff + '</td>' +
+            '<td>' + r.rating + '</td></tr>';
+        }).join('') +
+        '</tbody></table></div>' +
+        '<p class="muted small-note">Ranked by wins, then win rate, then point difference.' +
+        (board.minGames > 1
+          ? ' Minimum ' + board.minGames + ' games to rank &mdash; half of the ' + board.maxGames + ' the busiest player had.'
+          : '') +
+        '</p>';
+    }
+
+    if (board.mentions.length) {
+      html += '<div class="mentions"><h4>Special mentions</h4>' +
+        '<p class="muted small-note">Fewer than ' + board.minGames + ' games, so not ranked &mdash; but not forgotten.</p>' +
+        board.mentions.map(function (r) {
+          return '<div class="mention" data-action="player-detail" data-player="' + r.id + '">' +
+            '<strong>' + esc(r.name) + '</strong> ' +
+            '<span class="muted">' + r.wins + 'W&ndash;' + r.losses + 'L &middot; ' + r.games + (r.games === 1 ? ' game' : ' games') + '</span>' +
+            '<div class="lb-note">' + esc(r.note) + '</div></div>';
+        }).join('') +
+        '</div>';
+    }
+    return html;
   }
 
   /* ---------- Players view ---------- */
@@ -317,7 +328,7 @@
     var view = document.getElementById('view-stats');
     var byId = playersById();
     var stats = Engine.computeStats(DB.sessions);
-    var rows = leaderboardRows(stats, byId);
+    var board = leaderboardHtml(stats, byId);
 
     var sessionsHtml = DB.sessions.slice().reverse().map(function (s) {
       return '<div class="player-row" data-action="session-detail" data-session="' + s.id + '">' +
@@ -329,7 +340,7 @@
 
     view.innerHTML =
       '<div class="card"><h2>All-time leaderboard</h2>' +
-      (rows.trim() ? leaderboardTable(rows) : '<p class="muted">No games recorded yet. Finish some games in a session first.</p>') +
+      (board || '<p class="muted">No games recorded yet. Finish some games in a session first.</p>') +
       '<p class="muted small-note">Tap a player for their trend and history.</p></div>' +
       '<div class="card"><h2>Sessions (' + DB.sessions.length + ')</h2>' +
       (sessionsHtml || '<p class="muted">No sessions yet.</p>') + '</div>' +
@@ -404,12 +415,12 @@
     if (!sess) return;
     var byId = playersById();
     var stats = Engine.computeStats([sess]);
-    var rows = leaderboardRows(stats, byId, null);   // includes players who left early
+    var board = leaderboardHtml(stats, byId, null);   // includes players who left early
     openModal(
       '<h2>' + fmtDate(sess.startedAt) + '</h2>' +
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
-      (rows.trim() ? leaderboardTable(rows) : '<p class="muted">No scored games in this session.</p>') +
+      (board || '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
     );
   }

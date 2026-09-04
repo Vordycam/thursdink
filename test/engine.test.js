@@ -442,24 +442,26 @@ test('standings: unknown players and zero-game entries are left out', () => {
 
 /* ── USA Pickleball scoring ───────────────────────────────────────────── */
 
-test('checkScore accepts exactly the scores a game to 11 can finish on', () => {
+test('checkScore accepts exactly the scores first-to-11 can finish on', () => {
+  assert.equal(Engine.checkScore(11, 10).ok, true, '11-10 ends the game - no win-by-2');
   assert.equal(Engine.checkScore(11, 9).ok, true);
   assert.equal(Engine.checkScore(11, 0).ok, true);
   assert.equal(Engine.checkScore(0, 11).ok, true, 'order does not matter');
-  assert.equal(Engine.checkScore(12, 10).ok, true);
-  assert.equal(Engine.checkScore(15, 13).ok, true, 'a long deuce run from 10–10');
+  assert.equal(Engine.checkScore(10, 11).ok, true);
 });
 
-test('checkScore refuses unfinished games and impossible scores', () => {
+test('checkScore refuses unfinished games and scores past 11', () => {
   const short = Engine.checkScore(7, 4);
-  assert.equal(short.ok, false, 'the group plays to 11 — a short game is not finished');
+  assert.equal(short.ok, false, 'a short game is not finished');
   assert.match(short.error, /played to 11/);
-  assert.equal(Engine.checkScore(11, 10).ok, false);
-  assert.match(Engine.checkScore(11, 10).error, /won by 2/);
-  assert.equal(Engine.checkScore(13, 9).ok, false, 'would have ended 11–9');
+  assert.equal(Engine.checkScore(10, 9).ok, false, 'nobody reached 11 yet');
+
+  assert.equal(Engine.checkScore(12, 10).ok, false, 'the game ended at 11-10');
+  assert.match(Engine.checkScore(12, 10).error, /ends at 11/);
+  assert.equal(Engine.checkScore(15, 13).ok, false, 'no deuce in this format');
+  assert.equal(Engine.checkScore(13, 9).ok, false, 'would have ended 11-9');
   assert.match(Engine.checkScore(13, 9).error, /not possible/);
-  assert.equal(Engine.checkScore(15, 12).ok, false, 'would have ended 14–12');
-  assert.equal(Engine.checkScore(13, 12).ok, false, 'past 11 with a 1-point lead is still in play');
+
   assert.equal(Engine.checkScore(11, 11).ok, false);
   assert.match(Engine.checkScore(11, 11).error, /tie/);
   assert.equal(Engine.checkScore(null, 5).ok, false);

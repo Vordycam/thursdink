@@ -10,7 +10,9 @@
   var SKILL_RATINGS = { '2.0': 900, '2.5': 1000, '3.0': 1100, '3.5': 1250, '4.0': 1400, '4.5': 1550, '5.0': 1700, '5.5': 1850 };
   var ELO_K = 32;
 
-  /* Rec games are played to 11, win by 2 (USA Pickleball rule 12.A). */
+  /* The group plays first to 11, straight up - the game ends the moment a
+     side reaches 11, so 11-10 is a result. This is the group's own format,
+     chosen deliberately; USA Pickleball rule 12.A is win by 2. */
   var GAME_TARGET = 11;
 
   /* Team-making weights. Repeat partners and opponents dominate; the rating
@@ -136,7 +138,7 @@
    * whichever is latest.
    *
    * Real clock time, not game numbers. With two courts, game 5 can finish
-   * after game 6 if it goes to a long deuce; its players sat down later and
+   * after game 6 if it simply runs longer; its players sat down later and
    * have waited less, and only a timestamp gets that right.
    */
   function waitSince(session, id) {
@@ -294,11 +296,10 @@
   }
 
   /*
-   * Validate a final score against USA Pickleball rule 12.A for a game to 11.
-   * The first side to reach 11 with a two-point lead wins; tied at 10–10 or
-   * later, play continues until one side leads by exactly 2. So a finished
-   * game is always either 11 to 9-or-less, or a winner past 11 with the loser
-   * exactly 2 behind. Anything else is unfinished or mistyped, and refused.
+   * Validate a final score for first-to-11, straight up. The winner always
+   * has exactly 11 and the loser anything from 0 to 10. Under 11 the game is
+   * not finished; over 11 is not possible, because it ended at 11. Both are
+   * refused with a reason, which also catches the common mis-tap.
    */
   function checkScore(a, b) {
     if (a === null || b === null || a === undefined || b === undefined || isNaN(a) || isNaN(b)) {
@@ -311,14 +312,9 @@
       return { ok: false,
         error: 'Games are played to ' + GAME_TARGET + '. ' + hi + '–' + lo + ' is not a finished game.' };
     }
-    if (hi - lo < 2) {
+    if (hi > GAME_TARGET) {
       return { ok: false,
-        error: 'A game must be won by 2 points. ' + hi + '–' + lo + ' is not a finished game.' };
-    }
-    if (hi > GAME_TARGET && hi - lo !== 2) {
-      return { ok: false,
-        error: 'Past ' + GAME_TARGET + ' a game ends as soon as one side leads by 2, so ' +
-          hi + '–' + lo + ' is not possible. Check the scores.' };
+        error: 'The game ends at ' + GAME_TARGET + ', so ' + hi + '–' + lo + ' is not possible. Check the scores.' };
     }
     return { ok: true, error: null };
   }

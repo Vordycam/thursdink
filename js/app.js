@@ -607,8 +607,9 @@
     return isNaN(v) ? null : v;
   }
 
-  /* USA Pickleball scoring rules live in the engine; this just surfaces them.
-     The group plays to 11, win by 2, so anything else is refused outright. */
+  /* The scoring rule lives in the engine; this just surfaces it. The group
+     plays first to 11 straight up, so 11-10 is a result and anything under
+     or over 11 is refused outright. */
   function validScores(a, b) {
     var check = Engine.checkScore(a, b);
     if (!check.ok) { toast(check.error); return false; }

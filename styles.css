@@ -270,3 +270,24 @@ table.lb tbody tr:hover { background: var(--bg); }
 @media (min-width: 700px) {
   .courts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 }
+
+/* ---------- Fixed partners ---------- */
+.pair-tag {
+  display: inline-block; font-size: .65rem; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--green); background: #dcfce7;
+  border-radius: 6px; padding: 1px 6px; vertical-align: middle;
+}
+/* Held for a partner still on court: in the list, but not in the line. */
+.chip-held { border-style: dashed; color: var(--muted); background: #f8faf8; }
+.held-line { margin-top: 6px; }
+.pair-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 4px; border-bottom: 1px solid var(--line); min-height: 48px;
+}
+.pair-names { font-weight: 600; }
+.pairs-none, .pairs-help { margin: 0 0 8px; }
+.pair-add { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.pair-add select {
+  flex: 1 1 130px; min-height: 44px; font-size: 1rem; padding: 8px;
+  border: 1px solid var(--line); border-radius: 10px; background: #fff;
+}

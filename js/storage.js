@@ -8,7 +8,7 @@
     return {
       version: 1,
       players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived}
-      sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, rounds, status}
+      sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, pairs, games, status}
     };
   }
 

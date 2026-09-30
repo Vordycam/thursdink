@@ -2,7 +2,9 @@
    Each court runs independently: as soon as its game is scored, the next game
    starts from the waiting pool. Fairness is longest wait first, measured by
    the clock; team-making maximizes partner/opponent variety and competitive
-   balance among players who have waited the same length of time. */
+   balance among players who have waited the same length of time. Two people
+   may opt to be fixed partners for the night: they are then one unit in the
+   line and always land on the same team. */
 (function () {
   'use strict';
 
@@ -99,14 +101,72 @@
   }
 
   /*
+   * Fixed partners for the night. session.pairs holds [idA, idB] pairs; a
+   * pair is in effect only while both are checked in. Checking one partner
+   * out dissolves the pair (see setSessionPlayers) rather than leaving it to
+   * spring back silently if they return. Returns {id: partnerId} both ways.
+   */
+  function fixedPairs(session) {
+    var map = {};
+    var ids = session.playerIds || [];
+    (session.pairs || []).forEach(function (p) {
+      if (!p || p.length !== 2 || p[0] === p[1]) return;
+      if (ids.indexOf(p[0]) < 0 || ids.indexOf(p[1]) < 0) return;
+      map[p[0]] = p[1];
+      map[p[1]] = p[0];
+    });
+    return map;
+  }
+
+  /* Drop any pair this player is in. Returns whether one was removed. */
+  function clearPair(session, id) {
+    var before = (session.pairs || []).length;
+    session.pairs = (session.pairs || []).filter(function (p) { return p[0] !== id && p[1] !== id; });
+    return session.pairs.length !== before;
+  }
+
+  /* Make two checked-in players a pair. Anyone can be in only one pair, so
+     an earlier pair involving either of them is replaced. */
+  function setPair(session, a, b) {
+    if (!a || !b || a === b) return { ok: false, error: 'Pick two different players.' };
+    if (session.playerIds.indexOf(a) < 0 || session.playerIds.indexOf(b) < 0) {
+      return { ok: false, error: 'Both players must be checked in to this session.' };
+    }
+    clearPair(session, a);
+    clearPair(session, b);
+    session.pairs.push([a, b]);
+    return { ok: true, error: null };
+  }
+
+  function isFixedTeam(fixed, team) {
+    return !!fixed && fixed[team[0]] === team[1];
+  }
+
+  /* A split is allowed only if no fixed pair is separated across the net. */
+  function honoursPairs(teams, fixed) {
+    if (!fixed) return true;
+    for (var t = 0; t < 2; t++) {
+      var team = teams[t], other = teams[1 - t];
+      for (var i = 0; i < team.length; i++) {
+        var partner = fixed[team[i]];
+        if (partner && other.indexOf(partner) >= 0) return false;
+      }
+    }
+    return true;
+  }
+
+  /*
    * Cost of one court's grouping (4 players split into two teams).
    * Heavily penalize repeat partners, moderately penalize repeat opponents,
    * lightly prefer teams with similar combined ratings (competitive games).
+   * A fixed pair is meant to repeat, so their partnership is not counted -
+   * otherwise every game they play together would make their next court
+   * look worse and the engine would start leaving them on the bench.
    */
-  function pairingCost(t1, t2, counts, ratingOf) {
+  function pairingCost(t1, t2, counts, ratingOf, fixed) {
     var cost = 0;
-    cost += (counts.partners[pairKey(t1[0], t1[1])] || 0) * 100;
-    cost += (counts.partners[pairKey(t2[0], t2[1])] || 0) * 100;
+    if (!isFixedTeam(fixed, t1)) cost += (counts.partners[pairKey(t1[0], t1[1])] || 0) * 100;
+    if (!isFixedTeam(fixed, t2)) cost += (counts.partners[pairKey(t2[0], t2[1])] || 0) * 100;
     t1.forEach(function (a) {
       t2.forEach(function (b) {
         cost += (counts.opponents[pairKey(a, b)] || 0) * 20;
@@ -117,7 +177,10 @@
     return cost;
   }
 
-  function bestSplitOfFour(four, counts, ratingOf) {
+  /* Best of the three ways to split four players into two teams. Splits that
+     separate a fixed pair are not options; teams is null if none is allowed
+     (cannot happen when pairs are kept as units, but callers check). */
+  function bestSplitOfFour(four, counts, ratingOf, fixed) {
     var a = four[0], b = four[1], c = four[2], d = four[3];
     var options = [
       [[a, b], [c, d]],
@@ -126,7 +189,8 @@
     ];
     var best = null, bestCost = Infinity;
     options.forEach(function (opt) {
-      var cost = pairingCost(opt[0], opt[1], counts, ratingOf);
+      if (!honoursPairs(opt, fixed)) return;
+      var cost = pairingCost(opt[0], opt[1], counts, ratingOf, fixed);
       if (cost < bestCost) { bestCost = cost; best = opt; }
     });
     return { teams: best, cost: bestCost };
@@ -167,7 +231,8 @@
    * Set the session's player list. Newcomers are credited with the lightest
    * current load (used only to break ties among equal waits) and their wait
    * is clocked from now, so they join the back of the line. Rejoining
-   * restarts the clock but keeps any earlier credit.
+   * restarts the clock but keeps any earlier credit. A fixed pair whose
+   * member leaves is dissolved; if they come back, pair them again.
    */
   function setSessionPlayers(session, ids) {
     var counts = sessionCounts(session);
@@ -180,28 +245,78 @@
       meta[id].joinedAt = Date.now();
     });
     session.playerIds = ids;
+    if (session.pairs) {
+      session.pairs = session.pairs.filter(function (p) {
+        return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0;
+      });
+    }
   }
 
-  /* Waiting players in the order they are entitled to play: longest wait
-     first, then fewest games. `randomize` breaks exact ties by chance (used
-     when actually picking a game); otherwise roster order keeps the displayed
-     list from shuffling between renders. */
-  function rankPool(session, playersById, randomize) {
+  /*
+   * The waiting list as units, in the order they are entitled to play:
+   * longest wait first, then fewest games. A fixed pair is one unit of two,
+   * anyone else a unit of one. A pair has waited only as long as its later
+   * member - it cannot play until both are free - and carries the higher
+   * game count of the two, so opting in never buys court time at others'
+   * expense. A player whose partner is still on court is listed with
+   * `waitingFor` set and is not available until the partner sits down.
+   *
+   * `randomize` breaks exact ties by chance (used when actually picking a
+   * game); otherwise roster order keeps the displayed list from shuffling
+   * between renders.
+   */
+  function rankUnits(session, playersById, randomize) {
     var pool = waitingPool(session).filter(function (id) { return playersById[id]; });
     var counts = sessionCounts(session);
+    var fixed = fixedPairs(session);
+    var inPool = {};
+    pool.forEach(function (id) { inPool[id] = true; });
     var order = randomize ? shuffle(pool) : pool;
-    var scored = order.map(function (id) {
-      return { id: id, eff: effectiveGames(session, counts, id), since: waitSince(session, id) };
+    var seen = {}, units = [];
+    order.forEach(function (id) {
+      if (seen[id]) return;
+      seen[id] = true;
+      var unit = { ids: [id], eff: effectiveGames(session, counts, id), since: waitSince(session, id), waitingFor: null };
+      var partner = fixed[id];
+      if (partner && inPool[partner]) {
+        seen[partner] = true;
+        unit.ids.push(partner);
+        unit.eff = Math.max(unit.eff, effectiveGames(session, counts, partner));
+        unit.since = Math.max(unit.since, waitSince(session, partner));
+      } else if (partner) {
+        unit.waitingFor = partner;
+      }
+      units.push(unit);
     });
-    scored.sort(function (a, b) {
+    units.sort(function (a, b) {
       if (a.since !== b.since) return a.since - b.since;
       return a.eff - b.eff;
     });
-    return { scored: scored, counts: counts };
+    return { units: units, counts: counts };
   }
 
+  function queueUnits(session, playersById) {
+    return rankUnits(session, playersById, false).units;
+  }
+
+  /* The same list, one player per entry: partners sit side by side and share
+     their unit's wait and game count. */
   function queueOrder(session, playersById) {
-    return rankPool(session, playersById, false).scored;
+    var out = [];
+    queueUnits(session, playersById).forEach(function (u) {
+      u.ids.forEach(function (id) {
+        out.push({
+          id: id, eff: u.eff, since: u.since,
+          pairWith: u.ids.length > 1 ? (u.ids[0] === id ? u.ids[1] : u.ids[0]) : null,
+          waitingFor: u.waitingFor
+        });
+      });
+    });
+    return out;
+  }
+
+  function countIds(units) {
+    return units.reduce(function (n, u) { return n + u.ids.length; }, 0);
   }
 
   /*
@@ -227,18 +342,21 @@
     return bands;
   }
 
-  /* All k-sized subsets of a short list. Bounded by TIER_WINDOW, so at most
-     C(6,4) = 15 combinations are ever evaluated. */
-  function combos(items, k) {
+  /* All subsets of a short list of units whose players add up to exactly n.
+     Bounded by TIER_WINDOW in normal use, so only a handful are evaluated;
+     with n at most 4 it stays small even over a whole tier. */
+  function pickCombos(units, n) {
     var out = [];
-    (function rec(start, acc) {
-      if (acc.length === k) { out.push(acc.slice()); return; }
-      for (var i = start; i < items.length; i++) {
-        acc.push(items[i]);
-        rec(i + 1, acc);
+    (function rec(start, acc, size) {
+      if (size === n) { out.push(acc.slice()); return; }
+      for (var i = start; i < units.length; i++) {
+        var next = size + units[i].ids.length;
+        if (next > n) continue;
+        acc.push(units[i]);
+        rec(i + 1, acc, next);
         acc.pop();
       }
-    })(0, []);
+    })(0, [], 0);
     return out;
   }
 
@@ -248,51 +366,89 @@
     return other.since < chosen.since;
   }
 
-  /*
-   * Pick the next 4 players for a free court.
-   *
-   * Longest wait is the hard constraint. Anyone whose wait began more than
-   * TIE_WINDOW_MS before the fourth-ranked player's is locked in and cannot
-   * be skipped. Everyone within the window of that fourth player forms a
-   * tie; among them, fewer games goes first, and the engine may look up to
-   * TIER_WINDOW places past that to avoid a clearly worse court, paying
-   * LEAPFROG_PENALTY for each person it passes over.
-   */
-  function nextGame(session, playersById) {
-    var ranked = rankPool(session, playersById, true);
-    var scored = ranked.scored, counts = ranked.counts;
-    if (scored.length < 4) return null;
+  function byEntitlement(a, b) {
+    if (a.eff !== b.eff) return a.eff - b.eff;
+    return a.since - b.since;
+  }
 
-    function ratingOf(id) {
-      return (playersById[id] && playersById[id].rating) || 1250;
-    }
-
-    var pivot = scored[3].since;
-    var locked = [], tier = [];
-    scored.forEach(function (s) {
-      if (s.since < pivot - TIE_WINDOW_MS) locked.push(s);
-      else if (s.since <= pivot + TIE_WINDOW_MS) tier.push(s);
-    });
-    tier.sort(function (a, b) {
-      if (a.eff !== b.eff) return a.eff - b.eff;
-      return a.since - b.since;
-    });
-    var need = 4 - locked.length;
-    var candidates = tier.slice(0, need + TIER_WINDOW);
-
+  /* Best court from the locked units plus a pick from the candidates that
+     brings the count to four. Null when no pick fits - an odd number of
+     seats with only pairs to fill them. */
+  function pickCourt(locked, candidates, counts, ratingOf, fixed) {
+    var need = 4 - countIds(locked);
     var best = null, bestCost = Infinity;
-    combos(candidates, need).forEach(function (pick) {
-      var four = locked.concat(pick).map(function (s) { return s.id; });
-      var split = bestSplitOfFour(four, counts, ratingOf);
+    pickCombos(candidates, need).forEach(function (pick) {
+      var four = [];
+      locked.concat(pick).forEach(function (u) { four = four.concat(u.ids); });
+      var split = bestSplitOfFour(four, counts, ratingOf, fixed);
+      if (!split.teams) return;
       var cost = split.cost;
       pick.forEach(function (chosen) {
         candidates.forEach(function (other) {
           if (pick.indexOf(other) < 0 && outranks(other, chosen)) cost += LEAPFROG_PENALTY;
         });
       });
-      if (cost < bestCost) { bestCost = cost; best = split; }
+      if (cost < bestCost) { bestCost = cost; best = split.teams; }
     });
-    return { teamA: best.teams[0], teamB: best.teams[1] };
+    return best;
+  }
+
+  /*
+   * Pick the next 4 players for a free court.
+   *
+   * Longest wait is the hard constraint. Any unit whose wait began more than
+   * TIE_WINDOW_MS before the unit that brings the count to four is locked in
+   * and cannot be skipped. Everyone within the window of that unit forms a
+   * tie; among them, fewer games goes first, and the engine may look up to
+   * TIER_WINDOW units past that to avoid a clearly worse court, paying
+   * LEAPFROG_PENALTY for each unit it passes over.
+   *
+   * Fixed pairs can make that impossible: three locked singles and only
+   * pairs waiting leaves one seat that no unit fits. Rather than leave the
+   * court empty, the locked unit with the weakest claim (most games, then
+   * shortest wait) gives way and becomes an ordinary candidate; it is still
+   * first in line for the next court.
+   */
+  function nextGame(session, playersById) {
+    var ranked = rankUnits(session, playersById, true);
+    var counts = ranked.counts;
+    var units = ranked.units.filter(function (u) { return !u.waitingFor; });
+    if (countIds(units) < 4) return null;
+    var fixed = fixedPairs(session);
+
+    function ratingOf(id) {
+      return (playersById[id] && playersById[id].rating) || 1250;
+    }
+
+    var pivot = 0, seen = 0;
+    for (var i = 0; i < units.length; i++) {
+      seen += units[i].ids.length;
+      if (seen >= 4) { pivot = units[i].since; break; }
+    }
+    var locked = [], tier = [];
+    units.forEach(function (u) {
+      if (u.since < pivot - TIE_WINDOW_MS) locked.push(u);
+      else if (u.since <= pivot + TIE_WINDOW_MS) tier.push(u);
+    });
+
+    for (;;) {
+      tier.sort(byEntitlement);
+      var need = 4 - countIds(locked);
+      var covered = 0, k = tier.length;
+      for (var j = 0; j < tier.length; j++) {
+        covered += tier[j].ids.length;
+        if (covered >= need) { k = j + 1; break; }
+      }
+      var candidates = tier.slice(0, k + TIER_WINDOW);
+      var teams = pickCourt(locked, candidates, counts, ratingOf, fixed) ||
+        pickCourt(locked, tier, counts, ratingOf, fixed);
+      if (teams) return { teamA: teams[0], teamB: teams[1] };
+      // With nobody locked the tier holds four or more players, and any four
+      // or more players can always be seated - so this loop always ends.
+      if (!locked.length) return null;
+      locked.sort(byEntitlement);
+      tier.push(locked.pop());
+    }
   }
 
   /*
@@ -562,6 +718,10 @@
     waitBands: waitBands,
     completeGame: completeGame,
     setSessionPlayers: setSessionPlayers,
+    fixedPairs: fixedPairs,
+    setPair: setPair,
+    clearPair: clearPair,
+    queueUnits: queueUnits,
     queueOrder: queueOrder,
     fillCourts: fillCourts,
     checkScore: checkScore,

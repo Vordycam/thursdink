@@ -75,11 +75,15 @@
 
   /* ---------- Play view ---------- */
 
+  /* Pairs chosen on the setup screen, applied when the session starts. */
+  var setupPairs = [];
+
   function renderPlay() {
     var view = document.getElementById('view-play');
     var session = activeSession();
     if (!session) {
       view.innerHTML = renderSessionSetup();
+      renderSetupPairs();
     } else {
       view.innerHTML = renderActiveSession(session);
     }
@@ -113,22 +117,79 @@
       '<div class="setup-actions"><button class="btn small" data-action="setup-all">Select all</button>' +
       '<button class="btn small" data-action="setup-none">Select none</button></div>' +
       '<div class="check-list">' + checks + '</div></div>' +
+      '<div class="field"><label>Fixed partners <span class="muted">(optional)</span></label>' +
+      '<p class="muted small-note pairs-help">For anyone who wants to keep one partner all night. ' +
+      'Partners go on together every game and count as one entry in the waiting line.</p>' +
+      '<div id="setup-pairs"></div></div>' +
       '<button class="btn primary big" data-action="start-session">Start session</button>' +
       '</div>';
   }
 
-  function teamNames(team, byId) {
-    return team.map(function (id) {
-      return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
-    }).join(' &amp; ');
+  function checkedSetupIds() {
+    return Array.prototype.slice.call(document.querySelectorAll('.setup-player:checked'))
+      .map(function (el) { return el.value; });
   }
 
-  function renderActiveGameCard(m, byId) {
+  /* Redraw only the pairs block, so ticking a checkbox or adding a pair does
+     not reset the court picker and the check list around it. A pair whose
+     member is unticked is dropped. */
+  function renderSetupPairs() {
+    var el = document.getElementById('setup-pairs');
+    if (!el) return;
+    var ids = checkedSetupIds();
+    setupPairs = setupPairs.filter(function (p) { return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0; });
+    el.innerHTML = pairsBlockHtml(setupPairs, ids, playersById());
+  }
+
+  /* Current pairs, each with a Split button, plus a picker to add one from
+     whoever is unpaired. Shared by session setup and the in-session modal. */
+  function pairsBlockHtml(pairs, ids, byId) {
+    function name(id) { return byId[id] ? byId[id].name : '?'; }
+    var paired = {};
+    pairs.forEach(function (p) { paired[p[0]] = true; paired[p[1]] = true; });
+    var free = ids.filter(function (id) { return !paired[id] && byId[id]; });
+    free.sort(function (a, b) { return name(a).localeCompare(name(b)); });
+
+    var rows = pairs.map(function (p) {
+      return '<div class="pair-row"><span class="pair-names">' + esc(name(p[0])) + ' &amp; ' + esc(name(p[1])) +
+        ' <span class="pair-tag">pair</span></span>' +
+        '<button class="btn small" data-action="remove-pair" data-player="' + p[0] + '">Split</button></div>';
+    }).join('');
+    if (!rows) rows = '<p class="muted small-note pairs-none">No fixed partners.</p>';
+
+    var picker;
+    if (free.length >= 2) {
+      var opts = function (placeholder) {
+        return '<option value="">' + placeholder + '</option>' + free.map(function (id) {
+          return '<option value="' + id + '">' + esc(name(id)) + '</option>';
+        }).join('');
+      };
+      picker = '<div class="pair-add">' +
+        '<select class="pair-pick" aria-label="First partner">' + opts('Player') + '</select>' +
+        '<span class="muted">&amp;</span>' +
+        '<select class="pair-pick" aria-label="Second partner">' + opts('Partner') + '</select>' +
+        '<button class="btn small primary" data-action="add-pair">Pair up</button></div>';
+    } else {
+      picker = '<p class="muted small-note">Not enough unpaired players to add another pair.</p>';
+    }
+    return rows + picker;
+  }
+
+  /* `fixed` (from Engine.fixedPairs) tags a team that is a fixed pair. */
+  function teamNames(team, byId, fixed) {
+    var html = team.map(function (id) {
+      return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
+    }).join(' &amp; ');
+    if (fixed && team.length === 2 && fixed[team[0]] === team[1]) html += ' <span class="pair-tag">pair</span>';
+    return html;
+  }
+
+  function renderActiveGameCard(m, byId, fixed) {
     var scoreRow = function (side, team) {
       var v = side === 'A' ? m.scoreA : m.scoreB;
       var val = (v === null || v === undefined) ? '' : v;
       return '<div class="team-row">' +
-        '<div class="team-names">' + teamNames(team, byId) + '</div>' +
+        '<div class="team-names">' + teamNames(team, byId, fixed) + '</div>' +
         '<div class="score-ctl">' +
         '<button class="step-btn" data-action="score-step" data-match="' + m.id + '" data-side="' + side + '" data-d="-1">&minus;</button>' +
         '<input type="number" class="score-input" inputmode="numeric" min="0" max="99" ' +
@@ -149,12 +210,16 @@
       '</div></div>';
   }
 
-  function renderFreeCourtCard(court, poolCount) {
+  function renderFreeCourtCard(court, poolCount, readyCount) {
+    var why;
+    if (poolCount === 0) why = 'no one is waiting.';
+    else if (readyCount < poolCount) {
+      why = readyCount + ' of ' + poolCount + ' waiting are ready, needs 4. ' +
+        'Someone is held for a partner still on court.';
+    } else why = 'only ' + poolCount + ' waiting, needs 4.';
     return '<div class="match-card free-court">' +
       '<div class="court-label">Court ' + court + '</div>' +
-      '<p class="muted free-note">Free &mdash; ' +
-      (poolCount > 0 ? 'only ' + poolCount + ' waiting, needs 4.' : 'no one is waiting.') +
-      '</p></div>';
+      '<p class="muted free-note">Free &mdash; ' + why + '</p></div>';
   }
 
   function renderFinishedGameRow(m, byId) {
@@ -176,12 +241,22 @@
     var finished = (session.games || []).filter(function (g) { return g.done; });
     var pool = Engine.waitingPool(session);
     var counts = Engine.sessionCounts(session);
+    var fixed = Engine.fixedPairs(session);
+    var pairCount = (session.pairs || []).length;
+
+    // The line as units: a fixed pair is one entry. Anyone held back because
+    // their partner is still on court is listed separately, after the line.
+    var units = Engine.queueUnits(session, byId);
+    var ready = units.filter(function (u) { return !u.waitingFor; });
+    var held = units.filter(function (u) { return u.waitingFor; });
+    var readyCount = ready.reduce(function (n, u) { return n + u.ids.length; }, 0);
 
     var html = '<div class="session-bar">' +
       '<div><strong>Session</strong> &middot; ' + fmtDate(session.startedAt) +
       ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
       '<div class="session-bar-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
+      '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
       '<button class="btn small danger-outline" data-action="end-session">End session</button>' +
       '</div></div>';
 
@@ -189,29 +264,38 @@
     for (var c = 1; c <= session.courtCount; c++) {
       var g = null;
       actives.forEach(function (a) { if (a.court === c) g = a; });
-      html += g ? renderActiveGameCard(g, byId) : renderFreeCourtCard(c, pool.length);
+      html += g ? renderActiveGameCard(g, byId, fixed) : renderFreeCourtCard(c, pool.length, readyCount);
     }
     html += '</div>';
 
     if (pool.length) {
       // Longest wait first. Each chip carries its own clock and a colour for
       // where it sits: red fills the next court, yellow the one after, green
-      // just sat down or just arrived.
-      var queue = Engine.queueOrder(session, byId);
-      var bands = Engine.waitBands(queue);
+      // just sat down or just arrived. Bands are worked out over the people
+      // who can actually go on; someone held for a partner gets no colour.
+      var bands = Engine.waitBands(ready);
+      var chip = function (u, band, label) {
+        var names = u.ids.map(function (id) { return esc(byId[id] ? byId[id].name : '?'); }).join(' &amp; ');
+        var games = Math.max.apply(null, u.ids.map(function (id) { return counts.games[id] || 0; }));
+        return '<span class="chip chip-' + band + '" data-since="' + u.since + '">' +
+          (label ? '<span class="muted">' + label + '</span> ' : '') + names +
+          (u.ids.length > 1 ? ' <span class="pair-tag">pair</span>' : '') +
+          (u.waitingFor ? ' <span class="muted">waiting for ' + esc(byId[u.waitingFor] ? byId[u.waitingFor].name : '?') + '</span>' : '') +
+          ' <span class="wait-time">' + fmtWait(Date.now() - u.since) + '</span>' +
+          ' <span class="muted">(' + games + ')</span></span>';
+      };
       html += '<div class="sitouts"><span class="sitout-label">Waiting to play, longest wait first:</span> ' +
-        queue.map(function (q, i) {
-          return '<span class="chip chip-' + bands[i] + '" data-since="' + q.since + '">' +
-            '<span class="muted">' + (i + 1) + '.</span> ' +
-            esc(byId[q.id] ? byId[q.id].name : '?') +
-            ' <span class="wait-time">' + fmtWait(Date.now() - q.since) + '</span>' +
-            ' <span class="muted">(' + (counts.games[q.id] || 0) + ')</span></span>';
-        }).join(' ') +
+        ready.map(function (u, i) { return chip(u, bands[i], (i + 1) + '.'); }).join(' ') +
+        (held.length
+          ? '<div class="held-line"><span class="sitout-label">Held for a partner:</span> ' +
+            held.map(function (u) { return chip(u, 'held', ''); }).join(' ') + '</div>'
+          : '') +
         '<div class="muted small-note">' +
         '<span class="legend legend-red">Red</span> waited longest &middot; ' +
         '<span class="legend legend-yellow">Yellow</span> next &middot; ' +
         '<span class="legend legend-green">Green</span> most recent to sit down or arrive. ' +
-        'Time = how long they have been waiting; brackets = games played.</div></div>';
+        'Time = how long they have been waiting; brackets = games played.' +
+        (pairCount ? ' Fixed partners are one entry and go on together.' : '') + '</div></div>';
     }
 
     if (finished.length) {
@@ -324,6 +408,13 @@
     return n;
   }
 
+  /* "Ann & Ben, Cal & Dee" for the session's fixed partners, or ''. */
+  function pairsLine(session, byId) {
+    return (session.pairs || []).map(function (p) {
+      return (byId[p[0]] ? byId[p[0]].name : '?') + ' & ' + (byId[p[1]] ? byId[p[1]].name : '?');
+    }).join(', ');
+  }
+
   function renderStats() {
     var view = document.getElementById('view-stats');
     var byId = playersById();
@@ -416,10 +507,12 @@
     var byId = playersById();
     var stats = Engine.computeStats([sess]);
     var board = leaderboardHtml(stats, byId, null);   // includes players who left early
+    var partners = pairsLine(sess, byId);
     openModal(
       '<h2>' + fmtDate(sess.startedAt) + '</h2>' +
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
+      (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
     );
@@ -459,7 +552,7 @@
     openModal(
       '<h2>Session players</h2>' +
       '<p class="muted small-note">Check people in or out. Anyone mid-game finishes that game; ' +
-      'checked-out players just get no new games.</p>' +
+      'checked-out players just get no new games. Checking out one half of a fixed pair splits the pair.</p>' +
       '<div class="check-list">' + checks + '</div>' +
       '<div class="modal-actions">' +
       '<button class="btn" data-action="close-modal">Cancel</button>' +
@@ -468,15 +561,39 @@
     );
   }
 
+  function showPartners(session) {
+    openModal(
+      '<h2>Fixed partners</h2>' +
+      '<p class="muted small-note">Partners play every game together and wait as one entry in the line. ' +
+      'Changes apply from their next game; anyone mid-game finishes it first.</p>' +
+      '<div id="session-pairs">' + pairsBlockHtml(session.pairs || [], session.playerIds, playersById()) + '</div>' +
+      '<div class="modal-actions"><button class="btn" data-action="close-modal">Done</button></div>'
+    );
+  }
+
+  function refreshPartners(session) {
+    var el = document.getElementById('session-pairs');
+    if (el) el.innerHTML = pairsBlockHtml(session.pairs || [], session.playerIds, playersById());
+  }
+
   function showEditMatchup(matchId) {
     var session = activeSession();
     if (!session) return;
     var m = findGame(session, matchId);
     if (!m || m.done) return;
     var byId = playersById();
+    var fixed = Engine.fixedPairs(session);
     // Anyone on this court plus anyone waiting; players on other courts stay put
     var eligible = m.teamA.concat(m.teamB, Engine.waitingPool(session))
       .filter(function (id) { return byId[id]; });
+    var pairNames = [], noted = {};
+    eligible.forEach(function (id) {
+      var p = fixed[id];
+      if (p && !noted[id] && !noted[p]) {
+        noted[id] = noted[p] = true;
+        pairNames.push(esc(byId[id].name) + ' &amp; ' + esc(byId[p] ? byId[p].name : '?'));
+      }
+    });
     function slot(label, idx, selectedId) {
       var opts = eligible.map(function (id) {
         return '<option value="' + id + '"' + (id === selectedId ? ' selected' : '') + '>' +
@@ -489,6 +606,10 @@
       '<h2>Edit matchup</h2>' +
       '<p class="muted small-note">Court ' + m.court + '. Pick from the four on court or anyone waiting; ' +
       'whoever you swap out goes back to the waiting list.</p>' +
+      (pairNames.length
+        ? '<p class="muted small-note">Fixed partners: ' + pairNames.join(', ') +
+          '. Splitting them here applies to this game only.</p>'
+        : '') +
       '<div class="matchup-grid">' +
       '<div class="matchup-team"><h3>Team 1</h3>' + slot('Player 1', 0, m.teamA[0]) + slot('Player 2', 1, m.teamA[1]) + '</div>' +
       '<div class="matchup-team"><h3>Team 2</h3>' + slot('Player 1', 2, m.teamB[0]) + slot('Player 2', 3, m.teamB[1]) + '</div>' +
@@ -580,6 +701,7 @@
       courtCount: courts,
       playerIds: ids,
       playerMeta: {},
+      pairs: setupPairs.filter(function (p) { return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0; }),
       games: [],
       nextSeq: 1,
       status: 'active'
@@ -587,6 +709,7 @@
     var started = Engine.fillCourts(session, playersById());
     if (!started.length) { toast('Could not build a game.'); return; }
     DB.sessions.push(session);
+    setupPairs = [];
     persist();
     renderPlay();
     toast('Session started — games are up on ' + started.length + ' court(s).');
@@ -677,13 +800,56 @@
     if (ids.length < 4) { toast('A session needs at least 4 players.'); return; }
     // The engine credits newcomers with the lightest current load and clocks
     // their wait from now, so they join the back of the line rather than
-    // jumping people who were already waiting.
+    // jumping people who were already waiting. A pair is dissolved when
+    // either half is checked out.
+    var byId = playersById();
+    var pairsBefore = (session.pairs || []).length;
     Engine.setSessionPlayers(session, ids);
-    var started = Engine.fillCourts(session, playersById());
+    var split = pairsBefore - (session.pairs || []).length;
+    var started = Engine.fillCourts(session, byId);
     persist();
     closeModal();
     renderPlay();
-    toast(started.length ? 'Players updated — a free court just filled!' : 'Player list updated.');
+    var msg = started.length ? 'Players updated — a free court just filled!' : 'Player list updated.';
+    if (split) msg += ' ' + split + (split === 1 ? ' fixed pair was' : ' fixed pairs were') + ' split.';
+    toast(msg);
+  }
+
+  function addPair() {
+    var picks = Array.prototype.slice.call(document.querySelectorAll('.pair-pick'))
+      .map(function (s) { return s.value; });
+    var a = picks[0], b = picks[1];
+    if (!a || !b) { toast('Pick two players.'); return; }
+    if (a === b) { toast('Pick two different players.'); return; }
+    var session = activeSession();
+    if (!session) {
+      setupPairs.push([a, b]);
+      renderSetupPairs();
+      return;
+    }
+    var byId = playersById();
+    var r = Engine.setPair(session, a, b);
+    if (!r.ok) { toast(r.error); return; }
+    persist();
+    refreshPartners(session);
+    renderPlay();
+    toast(byId[a].name + ' & ' + byId[b].name + ' will play together from their next game.');
+  }
+
+  function removePair(playerId) {
+    var session = activeSession();
+    if (!session) {
+      setupPairs = setupPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
+      renderSetupPairs();
+      return;
+    }
+    Engine.clearPair(session, playerId);
+    // Someone held back for a partner still on court may now be free to play.
+    var started = Engine.fillCourts(session, playersById());
+    persist();
+    refreshPartners(session);
+    renderPlay();
+    toast('Pair split.' + (started.length ? ' A free court just filled.' : ''));
   }
 
   function endSession() {
@@ -790,6 +956,7 @@
       case 'setup-none':
         document.querySelectorAll('.setup-player').forEach(function (c) { c.checked = action === 'setup-all'; });
         updateSetupCount();
+        renderSetupPairs();
         break;
       case 'start-session': startSession(); break;
       case 'score-step': {
@@ -810,6 +977,9 @@
       case 'save-finished': saveFinished(t.getAttribute('data-match')); break;
       case 'manage-players': { var s = activeSession(); if (s) showManagePlayers(s); break; }
       case 'apply-manage-players': applyManagePlayers(); break;
+      case 'manage-partners': { var ps = activeSession(); if (ps) showPartners(ps); break; }
+      case 'add-pair': addPair(); break;
+      case 'remove-pair': removePair(t.getAttribute('data-player')); break;
       case 'end-session': endSession(); break;
       case 'add-player': addPlayer(); break;
       case 'edit-player': e.stopPropagation(); showEditPlayer(t.getAttribute('data-player')); break;
@@ -830,7 +1000,10 @@
   });
 
   document.addEventListener('change', function (e) {
-    if (e.target.classList && e.target.classList.contains('setup-player')) updateSetupCount();
+    if (e.target.classList && e.target.classList.contains('setup-player')) {
+      updateSetupCount();
+      renderSetupPairs();
+    }
   });
 
   document.addEventListener('keydown', function (e) {

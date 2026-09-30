@@ -179,6 +179,11 @@
         // Count and list everyone who played, including anyone who left early.
         doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + Engine.sessionParticipants(sess).length + ' players, ' +
           games + ' games' + (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
+        if ((sess.pairs || []).length) {
+          doc.text(MARGIN, 'Fixed partners: ' + sess.pairs.map(function (p) {
+            return (byId[p[0]] ? byId[p[0]].name : '?') + ' & ' + (byId[p[1]] ? byId[p[1]].name : '?');
+          }).join(', '), 8, false);
+        }
         doc.space(2);
         writeStandings(doc, Engine.rankStandings(Engine.computeStats([sess]), byId, null));
         doc.space(8);

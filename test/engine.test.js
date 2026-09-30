@@ -474,3 +474,164 @@ test('skill scale covers the full USA Pickleball range', () => {
   assert.ok(Engine.initialRating('5.5') > Engine.initialRating('5.0'));
   assert.equal(Engine.initialRating('3.5'), 1250, 'existing default unchanged');
 });
+
+/* ── fixed partners ───────────────────────────────────────────────────── */
+
+function sameTeam(game, a, b) {
+  return (game.teamA.includes(a) && game.teamA.includes(b)) ||
+    (game.teamB.includes(a) && game.teamB.includes(b));
+}
+
+test('fixed partners are always on the same team and are never split', () => {
+  // Ten players, two courts, random-length games. A and B are a pair for
+  // the night: whenever either is on a court, the other is beside them.
+  const names = 'ABCDEFGHIJ'.split('');
+  const byId = players(names);
+  const sess = session(names, 2);
+  sess.pairs = [['A', 'B']];
+  Engine.fillCourts(sess, byId);
+
+  let pairGames = 0;
+  for (let round = 0; round < 24; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(2 * MIN + Math.floor(Math.random() * 6 * MIN));
+    Engine.completeGame(g, 11, 6);
+    Engine.fillCourts(sess, byId);
+    Engine.activeGames(sess).forEach((game) => {
+      const four = onCourt(game);
+      if (four.includes('A') || four.includes('B')) {
+        assert.ok(sameTeam(game, 'A', 'B'), `A and B split on court ${game.court}: ${game.teamA} v ${game.teamB}`);
+      }
+    });
+  }
+  sess.games.forEach((g) => { if (g.done && sameTeam(g, 'A', 'B')) pairGames++; });
+  assert.ok(pairGames >= 3, `the pair still gets a fair share of games (${pairGames})`);
+});
+
+test('a partner whose other half is on court is held; once both are free they wait as one unit', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']);
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], 2);
+  sess.pairs = [['A', 'B']];
+  const g = { id: 'x1', court: 1, seq: 1, teamA: ['B', 'C'], teamB: ['D', 'E'], scoreA: null, scoreB: null, done: false, finishedAt: null };
+  sess.games.push(g);
+  sess.nextSeq = 2;
+
+  // Waiting: A (partner on court), F, G, H. Court 2 is free, but only three
+  // people are actually available - A sits until B is done.
+  assert.equal(Engine.fillCourts(sess, byId).length, 0, 'A cannot go on without B');
+  const held = Engine.queueUnits(sess, byId).find((u) => u.ids.includes('A'));
+  assert.deepEqual(held.ids, ['A']);
+  assert.equal(held.waitingFor, 'B');
+  assert.equal(Engine.queueOrder(sess, byId).find((q) => q.id === 'A').waitingFor, 'B');
+
+  advance(10 * MIN);
+  Engine.completeGame(g, 11, 5);
+  const unit = Engine.queueUnits(sess, byId).find((u) => u.ids.includes('A'));
+  assert.deepEqual(unit.ids.slice().sort(), ['A', 'B'], 'one unit of two');
+  assert.equal(unit.since, g.finishedAt, 'the pair has waited only since B sat down, not since A did');
+  assert.equal(unit.waitingFor, null);
+  const flat = Engine.queueOrder(sess, byId);
+  assert.equal(flat.find((q) => q.id === 'A').pairWith, 'B');
+  assert.equal(flat.find((q) => q.id === 'B').pairWith, 'A');
+
+  // Both courts fill. F, G, H waited ten minutes longer and are locked in;
+  // they take one single. The pair goes on the other court, together.
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 2);
+  const withPair = started.find((game) => onCourt(game).includes('A'));
+  assert.ok(withPair, 'the pair got a court');
+  assert.ok(sameTeam(withPair, 'A', 'B'));
+  const other = started.find((game) => game !== withPair);
+  assert.deepEqual(onCourt(other).filter((id) => 'FGH'.includes(id)).sort(), ['F', 'G', 'H']);
+});
+
+test('a fixed pair is not penalised for playing together again', () => {
+  // Singles A-D have each partnered every other one; the pair P and Q have
+  // played three games together (against X and Y, since gone home). All six
+  // are free at the same moment with three games each. P&Q against two
+  // singles repeats one partnership (100). Four singles repeats two (200)
+  // and every opponent pairing twice (160). If the pair's own repeat counted
+  // it would add 300 to their court and the engine would leave them sitting.
+  const byId = players(['A', 'B', 'C', 'D', 'P', 'Q', 'X', 'Y']);
+  const sess = session(['A', 'B', 'C', 'D', 'P', 'Q'], 1);
+  sess.pairs = [['P', 'Q']];
+  played(sess, ['A', 'B'], ['C', 'D']);
+  played(sess, ['A', 'C'], ['B', 'D']);
+  played(sess, ['A', 'D'], ['B', 'C']);
+  played(sess, ['P', 'Q'], ['X', 'Y']);
+  played(sess, ['P', 'Q'], ['X', 'Y']);
+  played(sess, ['P', 'Q'], ['X', 'Y']);
+
+  const game = Engine.fillCourts(sess, byId)[0];
+  const four = onCourt(game);
+  assert.ok(four.includes('P') && four.includes('Q'), `the pair plays: ${four}`);
+  assert.ok(sameTeam(game, 'P', 'Q'));
+});
+
+test('three locked singles and only a pair waiting: the court still fills, and the weakest claim gives way', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'P', 'Q', 'X', 'Y']);
+  const sess = session(['A', 'B', 'C', 'P', 'Q'], 1);
+  sess.pairs = [['P', 'Q']];
+  played(sess, ['C', 'D'], ['X', 'Y']);            // C has an extra game
+  played(sess, ['A', 'B'], ['C', 'D']);            // A, B, C free at t0
+  advance(5 * MIN);
+  played(sess, ['P', 'Q'], ['X', 'Y']);            // the pair free five minutes later
+  // A, B, C are locked in but only one seat is left and the pair needs two.
+  // Nobody fits, so the locked single with the most games (C) gives way.
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1, 'the court is not left empty');
+  const four = onCourt(started[0]).sort();
+  assert.deepEqual(four, ['A', 'B', 'P', 'Q']);
+  assert.ok(sameTeam(started[0], 'P', 'Q'));
+  assert.deepEqual(Engine.waitingPool(sess), ['C'], 'C is still first in line for the next court');
+});
+
+test('a late-joining partner puts the whole pair at the back of the line', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+  const sess = session(['A', 'C', 'D', 'E', 'F']);   // A waiting since the start
+  played(sess, ['C', 'D'], ['E', 'F']);
+  advance(8 * MIN);
+  Engine.setSessionPlayers(sess, ['A', 'C', 'D', 'E', 'F', 'B', 'G']);   // B and G arrive
+  assert.equal(Engine.setPair(sess, 'A', 'B').ok, true);
+
+  const units = Engine.queueUnits(sess, byId);
+  const pair = units.find((u) => u.ids.length === 2);
+  assert.deepEqual(pair.ids.slice().sort(), ['A', 'B']);
+  assert.equal(pair.since, clock, 'the pair has waited only since B arrived');
+  assert.ok(units.indexOf(pair) >= 4, 'behind the four who finished a game eight minutes ago');
+  const four = onCourt(Engine.fillCourts(sess, byId)[0]).sort();
+  assert.deepEqual(four, ['C', 'D', 'E', 'F'], 'A alone would have been first in line; as a pair they wait');
+});
+
+test('setPair, clearPair and check-out keep at most one pair per player', () => {
+  const sess = session(['A', 'B', 'C', 'D', 'E']);
+  assert.equal(Engine.setPair(sess, 'A', 'B').ok, true);
+  assert.equal(Engine.setPair(sess, 'A', 'A').ok, false, 'a player cannot partner themselves');
+  assert.equal(Engine.setPair(sess, 'A', 'Z').ok, false, 'both must be in the session');
+  assert.deepEqual(Engine.fixedPairs(sess), { A: 'B', B: 'A' });
+
+  Engine.setPair(sess, 'B', 'C');                  // B moves on: the A-B pair is replaced
+  assert.deepEqual(sess.pairs, [['B', 'C']]);
+  assert.equal(Engine.fixedPairs(sess).A, undefined);
+
+  Engine.setSessionPlayers(sess, ['A', 'B', 'D', 'E']);   // C leaves
+  assert.deepEqual(sess.pairs, [], 'the pair goes with them');
+
+  Engine.setPair(sess, 'D', 'E');
+  assert.equal(Engine.clearPair(sess, 'E'), true);
+  assert.equal(Engine.clearPair(sess, 'E'), false);
+  assert.deepEqual(sess.pairs, []);
+
+  const legacy = session(['A', 'B', 'C', 'D']);   // sessions saved before pairs existed
+  delete legacy.pairs;
+  assert.deepEqual(Engine.fixedPairs(legacy), {});
+  assert.equal(Engine.setPair(legacy, 'A', 'B').ok, true);
+  assert.deepEqual(legacy.pairs, [['A', 'B']]);
+});
+
+test('waitBands treat a pair as one entry', () => {
+  const t = clock;
+  const bands = Engine.waitBands([{ ids: ['A', 'B'], since: t }, { ids: ['C'], since: t + 5 * MIN }]);
+  assert.deepEqual(bands, ['red', 'green']);
+});

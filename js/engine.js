@@ -731,6 +731,34 @@
     return { sessions: sessions, players: (data.players || []).length };
   }
 
+  /*
+   * A player's night-by-night record, oldest first, with their rating at
+   * the end of each session. Worked back from the current rating through
+   * the deltas recorded on each scored game, so it is exact whatever the
+   * clock said; `start` is the rating before their first recorded game.
+   */
+  function playerProgression(player, sessions) {
+    var rows = [];
+    var rating = player.rating;
+    for (var i = sessions.length - 1; i >= 0; i--) {
+      var s = sessions[i];
+      var st = computeStats([s])[player.id];
+      if (!st) continue;
+      var change = 0;
+      sessionMatches(s).forEach(function (m) {
+        if (m.done && m.ratingDeltas && m.ratingDeltas[player.id]) change += m.ratingDeltas[player.id];
+      });
+      rows.push({
+        id: s.id, startedAt: s.startedAt, active: s.status === 'active',
+        games: st.games, wins: st.wins, losses: st.losses, diff: st.pf - st.pa,
+        ratingAfter: rating, ratingChange: change
+      });
+      rating -= change;
+    }
+    rows.reverse();
+    return { rows: rows, start: rating };
+  }
+
   /* Everyone who was part of a session: still checked in, or finished a game
      before leaving. Used for the "N players" figure and the standings. */
   function sessionParticipants(session) {
@@ -841,6 +869,7 @@
     computeStats: computeStats,
     sessionParticipants: sessionParticipants,
     rankStandings: rankStandings,
+    playerProgression: playerProgression,
     resetProgress: resetProgress,
     matchBySkill: matchBySkill,
     skillCategory: skillCategory,

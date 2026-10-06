@@ -840,3 +840,30 @@ test('resetProgress deletes every session and returns each player to their start
   assert.deepEqual(Engine.resetProgress({ players: [], sessions: [] }), { sessions: 0, players: 0 }, 'an empty store is fine');
   assert.deepEqual(Engine.resetProgress({}), { sessions: 0, players: 0 }, 'so is a bare object');
 });
+
+/* ── player progression ───────────────────────────────────────────────── */
+
+test('playerProgression walks the rating back through each session, oldest first', () => {
+  const p = { id: 'A', name: 'Ann', skill: '3.5', rating: 1290 };
+  const s1 = session(['A', 'B', 'C', 'D']); s1.id = 's1'; s1.status = 'done'; s1.startedAt = 100;
+  s1.games.push({ seq: 1, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: 11, scoreB: 5, done: true, ratingDeltas: { A: 16, B: 16, C: -16, D: -16 } });
+  s1.games.push({ seq: 2, teamA: ['A', 'C'], teamB: ['B', 'D'], scoreA: 7, scoreB: 11, done: true, ratingDeltas: { A: -12, C: -12, B: 12, D: 12 } });
+  const s2 = session(['B', 'C', 'D', 'E']); s2.id = 's2'; s2.status = 'done'; s2.startedAt = 200;   // Ann not there
+  s2.games.push({ seq: 1, teamA: ['B', 'C'], teamB: ['D', 'E'], scoreA: 11, scoreB: 5, done: true, ratingDeltas: { B: 10, C: 10, D: -10, E: -10 } });
+  const s3 = session(['A', 'B', 'C', 'D']); s3.id = 's3'; s3.startedAt = 300;                        // tonight, still running
+  s3.games.push({ seq: 1, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: 11, scoreB: 9, done: true, ratingDeltas: { A: 36, B: 36, C: -36, D: -36 } });
+  s3.games.push({ seq: 2, teamA: ['A', 'C'], teamB: ['B', 'D'], scoreA: null, scoreB: null, done: false, ratingDeltas: null });
+
+  const prog = Engine.playerProgression(p, [s1, s2, s3]);
+  assert.equal(prog.start, 1250, 'the rating before her first game: 1290 - 36 - (16 - 12)');
+  assert.deepEqual(prog.rows.map((r) => [r.id, r.wins, r.losses, r.diff, r.ratingAfter, r.ratingChange, r.active]), [
+    ['s1', 1, 1, 2, 1254, 4, false],
+    ['s3', 1, 0, 2, 1290, 36, true],
+  ], 'a night she missed is left out; the unscored game counts for nothing');
+
+  // A legacy game saved without deltas moves nothing; no games means no rows.
+  const legacy = session(['A', 'B', 'C', 'D']); legacy.id = 'l'; legacy.status = 'done';
+  legacy.games.push({ seq: 1, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: 11, scoreB: 1, done: true });
+  assert.deepEqual(Engine.playerProgression(p, [legacy]).rows.map((r) => [r.ratingAfter, r.ratingChange]), [[1290, 0]]);
+  assert.deepEqual(Engine.playerProgression({ id: 'Z', rating: 1100 }, [s1, s2, s3]), { rows: [], start: 1100 });
+});

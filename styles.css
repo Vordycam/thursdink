@@ -296,3 +296,25 @@ table.lb tbody tr:hover { background: var(--bg); }
 .btn.on { background: #dcfce7; border-color: #86efac; color: var(--green-dark); }
 /* Skill level beside a name, shown while matching by skill. */
 .lvl { font-size: .78em; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* ---------- Player photos & profile ---------- */
+.avatar {
+  width: 40px; height: 40px; border-radius: 50%; object-fit: cover; flex: none;
+  background: var(--bg); border: 1px solid var(--line);
+}
+.avatar-initials {
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: .85rem; color: var(--green); background: #dcfce7; border-color: #bbf7d0;
+}
+.avatar.big { width: 84px; height: 84px; font-size: 1.6rem; }
+.player-main { flex: 1; min-width: 0; }
+.profile-head { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; }
+.profile-head h2 { margin: 0 0 2px; }
+.profile-head p { margin: 0; }
+.photo-edit { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+table.prog { width: 100%; border-collapse: collapse; font-size: .92rem; }
+table.prog th, table.prog td { padding: 7px 4px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.prog th { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+table.prog th:first-child, table.prog td:first-child { text-align: left; }
+.delta-up { color: var(--win); font-weight: 700; }
+.delta-down { color: var(--danger); font-weight: 700; }

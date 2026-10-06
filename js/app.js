@@ -19,7 +19,7 @@
     if (changed) Storage_.save(DB);
   })();
 
-  function persist() { Storage_.save(DB); }
+  function persist() { return Storage_.save(DB); }
 
   function playersById() {
     var map = {};
@@ -67,6 +67,52 @@
     return Engine.SKILL_CATEGORIES.map(function (c) {
       return esc(c.name) + ' ' + c.from + '&ndash;' + c.to;
     }).join(' &middot; ');
+  }
+
+  /* ---------- Player photos ---------- */
+
+  function initials(name) {
+    var parts = String(name || '').trim().split(/\s+/).filter(Boolean).slice(0, 2);
+    return parts.map(function (w) { return w.charAt(0); }).join('').toUpperCase() || '?';
+  }
+
+  /* A player's photo as a round thumbnail, or their initials when they have
+     none. Only a photo in the form this app saves (a base64 image data URL)
+     is rendered as an image, so a hand-edited backup cannot inject markup. */
+  function avatarHtml(p, cls) {
+    var extra = cls ? ' ' + cls : '';
+    if (p.photo && /^data:image\/[a-z]+;base64,[A-Za-z0-9+\/=]+$/.test(p.photo)) {
+      return '<img class="avatar' + extra + '" src="' + p.photo + '" alt="">';
+    }
+    return '<span class="avatar avatar-initials' + extra + '">' + esc(initials(p.name)) + '</span>';
+  }
+
+  /* Shrink a chosen picture to a small square JPEG data URL - about 20 KB -
+     so a whole roster of photos fits comfortably in the device's storage. */
+  var PHOTO_SIZE = 240;
+  function shrinkPhoto(file, done) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var w = img.naturalWidth || img.width, h = img.naturalHeight || img.height;
+        var side = Math.min(w, h);
+        if (!side) { done(null, 'That file does not look like a photo.'); return; }
+        var canvas = document.createElement('canvas');
+        canvas.width = PHOTO_SIZE;
+        canvas.height = PHOTO_SIZE;
+        var ctx = canvas.getContext('2d');
+        if (!ctx) { done(null, 'This browser cannot resize photos.'); return; }
+        ctx.drawImage(img, (w - side) / 2, (h - side) / 2, side, side, 0, 0, PHOTO_SIZE, PHOTO_SIZE);
+        var dataUrl;
+        try { dataUrl = canvas.toDataURL('image/jpeg', 0.82); } catch (e) { dataUrl = null; }
+        if (dataUrl) done(dataUrl, null); else done(null, 'Could not read that photo.');
+      };
+      img.onerror = function () { done(null, 'That file does not look like a photo.'); };
+      img.src = reader.result;
+    };
+    reader.onerror = function () { done(null, 'Could not read the file.'); };
+    reader.readAsDataURL(file);
   }
 
   function toast(msg) {
@@ -410,6 +456,7 @@
     var rows = roster.map(function (p) {
       var s = stats[p.id] || { games: 0, wins: 0, losses: 0 };
       return '<div class="player-row" data-action="player-detail" data-player="' + p.id + '">' +
+        avatarHtml(p) +
         '<div class="player-main"><strong>' + esc(p.name) + '</strong>' +
         '<span class="muted">skill ' + skillText(p.skill) + ' &middot; rating ' + p.rating + ' &middot; ' +
         s.wins + 'W&ndash;' + s.losses + 'L</span></div>' +
@@ -520,20 +567,32 @@
     var s = all[playerId] || { games: 0, wins: 0, losses: 0, pf: 0, pa: 0 };
     var pct = s.games ? Math.round(100 * s.wins / s.games) : 0;
 
-    var sessionsHtml = DB.sessions.slice().reverse().map(function (sess) {
-      var inIt = Engine.sessionMatches(sess).some(function (m) {
-        return m.teamA.indexOf(playerId) >= 0 || m.teamB.indexOf(playerId) >= 0;
-      });
-      if (!inIt) return '';
-      var st = Engine.computeStats([sess])[playerId] || { wins: 0, losses: 0, pf: 0, pa: 0 };
-      return '<div class="mini-row"><span>' + fmtDate(sess.startedAt) + '</span>' +
-        '<span>' + st.wins + 'W&ndash;' + st.losses + 'L, ' +
-        ((st.pf - st.pa) > 0 ? '+' : '') + (st.pf - st.pa) + ' pts</span></div>';
-    }).join('');
+    // Night by night, oldest first, with the rating they left each night on.
+    var prog = Engine.playerProgression(p, DB.sessions);
+    var change = p.rating - prog.start;
+    var signed = function (d) { return (d < 0 ? '&minus;' : '+') + Math.abs(d); };
+    var deltaHtml = function (d) {
+      if (!d) return '<span class="muted">0</span>';
+      return '<span class="' + (d > 0 ? 'delta-up' : 'delta-down') + '">' + signed(d) + '</span>';
+    };
+    var sessionsHtml = prog.rows.length
+      ? '<div class="table-wrap"><table class="prog">' +
+        '<thead><tr><th>Session</th><th>W&ndash;L</th><th>+/&minus;</th><th>Rating</th></tr></thead><tbody>' +
+        '<tr><td class="muted">Start</td><td></td><td></td><td>' + prog.start + '</td></tr>' +
+        prog.rows.map(function (r) {
+          return '<tr><td>' + fmtDate(r.startedAt) + (r.active ? ' <span class="muted">(tonight)</span>' : '') + '</td>' +
+            '<td>' + r.wins + '&ndash;' + r.losses + '</td>' +
+            '<td>' + (r.diff > 0 ? '+' : '') + r.diff + '</td>' +
+            '<td>' + r.ratingAfter + ' ' + deltaHtml(r.ratingChange) + '</td></tr>';
+        }).join('') +
+        '</tbody></table></div>'
+      : '';
 
     openModal(
-      '<h2>' + esc(p.name) + '</h2>' +
-      '<p class="muted">Skill ' + skillText(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong></p>' +
+      '<div class="profile-head">' + avatarHtml(p, 'big') +
+      '<div><h2>' + esc(p.name) + '</h2>' +
+      '<p class="muted">Skill ' + skillText(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong>' +
+      (prog.rows.length ? ' (' + signed(change) + ' since their first game)' : '') + '</p></div></div>' +
       sparkline(p.ratingHistory) +
       '<div class="stat-grid">' +
       '<div class="stat-box"><div class="stat-num">' + s.games + '</div><div class="stat-lbl">Games</div></div>' +
@@ -541,8 +600,11 @@
       '<div class="stat-box"><div class="stat-num">' + pct + '%</div><div class="stat-lbl">Win rate</div></div>' +
       '<div class="stat-box"><div class="stat-num">' + ((s.pf - s.pa) > 0 ? '+' : '') + (s.pf - s.pa) + '</div><div class="stat-lbl">Point diff</div></div>' +
       '</div>' +
-      (sessionsHtml ? '<h3>By session</h3>' + sessionsHtml : '') +
-      '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
+      (sessionsHtml ? '<h3>Progression by session</h3>' + sessionsHtml : '') +
+      '<div class="modal-actions">' +
+      '<button class="btn" data-action="edit-player" data-player="' + p.id + '">Edit</button>' +
+      '<span class="spacer"></span>' +
+      '<button class="btn" data-action="close-modal">Close</button></div>'
     );
   }
 
@@ -569,12 +631,19 @@
     var p = playersById()[playerId];
     if (!p) return;
     var skillOpts = skillOptions(p.skill);
+    pendingPhoto = undefined;
     openModal(
       '<h2>Edit player</h2>' +
       '<div class="field"><label>Name</label>' +
       '<input type="text" id="edit-player-name" value="' + esc(p.name) + '" maxlength="30"></div>' +
       '<div class="field"><label>Skill level</label>' +
       '<select id="edit-player-skill">' + skillOpts + '</select></div>' +
+      '<div class="field"><label>Photo</label>' +
+      '<div class="photo-edit"><span id="edit-photo-preview">' + avatarHtml(p, 'big') + '</span>' +
+      '<input type="file" id="edit-player-photo" accept="image/*" hidden>' +
+      '<button class="btn small" data-action="pick-photo">' + (p.photo ? 'Change photo' : 'Add photo') + '</button>' +
+      '<button class="btn small" data-action="remove-photo"' + (p.photo ? '' : ' hidden') + '>Remove</button></div>' +
+      '<p class="muted small-note">Kept on this device only, shrunk to a small square.</p></div>' +
       '<div class="modal-actions">' +
       '<button class="btn danger-outline" data-action="archive-player" data-player="' + p.id + '">Archive</button>' +
       '<span class="spacer"></span>' +
@@ -939,10 +1008,60 @@
       p.skill = skill;
       if (!hadGames) p.rating = Engine.initialRating(skill);
     }
-    persist();
+    var prevPhoto = p.photo, newPhoto = pendingPhoto;
+    pendingPhoto = undefined;
+    if (newPhoto === null) delete p.photo;
+    else if (newPhoto) p.photo = newPhoto;
+    var saved = persist();
+    if (!saved && newPhoto) {
+      // The one thing that can push the store over the device's limit is a
+      // photo. Keep the rest of the edit and leave the photo out.
+      if (prevPhoto) p.photo = prevPhoto; else delete p.photo;
+      persist();
+      closeModal();
+      renderAll();
+      toast('Saved, but the photo did not fit: this device\'s storage is full. Try removing other photos.');
+      return;
+    }
     closeModal();
     renderAll();
     toast('Saved.');
+  }
+
+  /* The photo chosen in the edit modal, held until Save: undefined leaves
+     it as it is, null removes it, a string is the new (shrunk) picture. */
+  var pendingPhoto;
+
+  function pickPhoto() {
+    var input = document.getElementById('edit-player-photo');
+    if (input) input.click();
+  }
+
+  function photoChosen(input) {
+    var file = input.files && input.files[0];
+    if (!file) return;
+    shrinkPhoto(file, function (dataUrl, err) {
+      input.value = '';
+      if (err) { toast(err); return; }
+      pendingPhoto = dataUrl;
+      var preview = document.getElementById('edit-photo-preview');
+      if (preview) preview.innerHTML = avatarHtml({ name: '', photo: dataUrl }, 'big');
+      var pick = document.querySelector('[data-action="pick-photo"]');
+      if (pick) pick.textContent = 'Change photo';
+      var rm = document.querySelector('[data-action="remove-photo"]');
+      if (rm) rm.hidden = false;
+    });
+  }
+
+  function removePhoto() {
+    pendingPhoto = null;
+    var nameEl = document.getElementById('edit-player-name');
+    var preview = document.getElementById('edit-photo-preview');
+    if (preview) preview.innerHTML = avatarHtml({ name: nameEl ? nameEl.value : '' }, 'big');
+    var pick = document.querySelector('[data-action="pick-photo"]');
+    if (pick) pick.textContent = 'Add photo';
+    var rm = document.querySelector('[data-action="remove-photo"]');
+    if (rm) rm.hidden = true;
   }
 
   function archivePlayer(playerId) {
@@ -1070,6 +1189,8 @@
       case 'add-player': addPlayer(); break;
       case 'edit-player': e.stopPropagation(); showEditPlayer(t.getAttribute('data-player')); break;
       case 'save-player': savePlayer(t.getAttribute('data-player')); break;
+      case 'pick-photo': pickPhoto(); break;
+      case 'remove-photo': removePhoto(); break;
       case 'archive-player': archivePlayer(t.getAttribute('data-player')); break;
       case 'unarchive-player': {
         var p = playersById()[t.getAttribute('data-player')];
@@ -1092,6 +1213,7 @@
       updateSetupCount();
       renderSetupPairs();
     }
+    if (e.target.id === 'edit-player-photo') photoChosen(e.target);
   });
 
   document.addEventListener('keydown', function (e) {

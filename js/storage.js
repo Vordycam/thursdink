@@ -7,7 +7,7 @@
   function defaultData() {
     return {
       version: 1,
-      players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived}
+      players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived, photo?: small JPEG data URL}
       sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, pairs, games, status}
     };
   }

@@ -469,7 +469,7 @@ test('checkScore refuses unfinished games and scores past 11', () => {
 });
 
 test('skill scale covers the full USA Pickleball range', () => {
-  assert.deepEqual(Engine.SKILL_LEVELS, ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']);
+  assert.deepEqual(Engine.SKILL_LEVELS.slice(2), ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5'], 'the original rungs, in order');
   assert.ok(Engine.initialRating('2.0') < Engine.initialRating('2.5'));
   assert.ok(Engine.initialRating('5.5') > Engine.initialRating('5.0'));
   assert.equal(Engine.initialRating('3.5'), 1250, 'existing default unchanged');
@@ -634,4 +634,180 @@ test('waitBands treat a pair as one entry', () => {
   const t = clock;
   const bands = Engine.waitBands([{ ids: ['A', 'B'], since: t }, { ids: ['C'], since: t + 5 * MIN }]);
   assert.deepEqual(bands, ['red', 'green']);
+});
+
+/* ── skill categories ─────────────────────────────────────────────────── */
+
+test('skill categories: Beginner 1.0-2.5, Novice 3.0-3.5, Intermediate 4.0-4.5, Expert 5.0-5.5', () => {
+  assert.deepEqual(Engine.SKILL_LEVELS, ['1.0', '1.5', '2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']);
+  assert.deepEqual(Engine.SKILL_CATEGORIES.map((c) => c.name), ['Beginner', 'Novice', 'Intermediate', 'Expert']);
+  const byLevel = {};
+  Engine.SKILL_LEVELS.forEach((s) => { byLevel[s] = Engine.skillCategory(s); });
+  assert.deepEqual(byLevel, {
+    '1.0': 'Beginner', '1.5': 'Beginner', '2.0': 'Beginner', '2.5': 'Beginner',
+    '3.0': 'Novice', '3.5': 'Novice',
+    '4.0': 'Intermediate', '4.5': 'Intermediate',
+    '5.0': 'Expert', '5.5': 'Expert',
+  });
+  assert.equal(Engine.skillCategory('6.0'), '', 'off the scale');
+  assert.equal(Engine.skillCategory(undefined), '', 'a player saved without a level');
+  // The ladder keeps climbing below 2.0 and the existing rungs are untouched.
+  assert.ok(Engine.initialRating('1.0') < Engine.initialRating('1.5'));
+  assert.ok(Engine.initialRating('1.5') < Engine.initialRating('2.0'));
+  assert.equal(Engine.initialRating('2.0'), 900);
+  assert.equal(Engine.initialRating('3.5'), 1250);
+  assert.equal(Engine.initialRating('5.5'), 1850);
+});
+
+/* ── match by skill ───────────────────────────────────────────────────── */
+
+/* Players with explicit levels: { A: '3.0', B: '4.5', ... } */
+function levelled(table) {
+  const byId = {};
+  Object.keys(table).forEach((name) => {
+    byId[name] = { id: name, name, skill: table[name], rating: Engine.initialRating(table[name]) };
+  });
+  return byId;
+}
+
+function levelsOf(game, byId) {
+  return onCourt(game).map((id) => byId[id].skill).sort();
+}
+
+test('match by skill is off unless the session turns it on', () => {
+  const sess = session(['A', 'B', 'C', 'D']);
+  assert.equal(Engine.matchBySkill(sess), false, 'sessions saved before this option have no flag');
+  sess.matchBySkill = true;
+  assert.equal(Engine.matchBySkill(sess), true);
+});
+
+test('match by skill: courts are made of players at the same level', () => {
+  // Four 3.0s and four 4.5s, two courts, everyone tied at the start. Each
+  // court comes out at a single level.
+  const byId = levelled({ A: '3.0', B: '3.0', C: '3.0', D: '3.0', E: '4.5', F: '4.5', G: '4.5', H: '4.5' });
+  const sess = session(Object.keys(byId), 2);
+  sess.matchBySkill = true;
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 2);
+  const courts = started.map((g) => levelsOf(g, byId).join(' ')).sort();
+  assert.deepEqual(courts, ['3.0 3.0 3.0 3.0', '4.5 4.5 4.5 4.5']);
+});
+
+test('match by skill: the longest wait always plays, with the closest-rated players around them', () => {
+  // A, a 5.0, has waited ten minutes. Everyone else just sat down: four
+  // 3.0s and one 4.5. A is far from everyone but goes on regardless, and
+  // the 4.5 is seated with A because that makes the more even game.
+  const byId = levelled({ A: '5.0', B: '3.0', C: '3.0', D: '3.0', E: '3.0', F: '4.5', X: '3.5', Y: '3.5', Z: '3.5' });
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F'], 1);
+  sess.matchBySkill = true;
+  played(sess, ['A', 'X'], ['Y', 'Z']);                  // A free at t0
+  advance(10 * MIN);
+  played(sess, ['B', 'C'], ['D', 'E']);
+  played(sess, ['F', 'X'], ['Y', 'Z']);                  // the rest free now
+  const game = Engine.fillCourts(sess, byId)[0];
+  const four = onCourt(game);
+  assert.ok(four.includes('A'), 'the longest wait is never skipped');
+  assert.ok(four.includes('F'), 'the 4.5 is brought on with the 5.0');
+});
+
+test('match by skill: a long wait is not skipped for half a level', () => {
+  // A (3.5) has waited longest and is up. B (4.0) sat down two minutes
+  // after A; C, D, E (3.5) eight minutes after that. Leaving B out would
+  // make a perfectly level court, but B has waited eight minutes longer than
+  // the 3.5s and half a level is not reason enough to pass B over.
+  const byId = levelled({ A: '3.5', B: '4.0', C: '3.5', D: '3.5', E: '3.5', X: '3.5', Y: '3.5', Z: '3.5' });
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  sess.matchBySkill = true;
+  played(sess, ['A', 'X'], ['Y', 'Z']);
+  advance(2 * MIN);
+  played(sess, ['B', 'X'], ['Y', 'Z']);
+  advance(8 * MIN);
+  played(sess, ['C', 'D'], ['E', 'X']);
+  const four = onCourt(Engine.fillCourts(sess, byId)[0]);
+  assert.ok(four.includes('A') && four.includes('B'), `A and B both play: ${four}`);
+});
+
+test('match by skill: a level and a half can pass a long wait over once; then they go first', () => {
+  // Same shape, but B is a 4.5 among 3.0s. B is left out this time for an
+  // even court - and is then first for the next one, which is built around B.
+  const byId = levelled({ A: '3.0', B: '4.5', C: '3.0', D: '3.0', E: '3.0', X: '3.0', Y: '3.0', Z: '3.0' });
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  sess.matchBySkill = true;
+  played(sess, ['A', 'X'], ['Y', 'Z']);
+  advance(2 * MIN);
+  played(sess, ['B', 'X'], ['Y', 'Z']);
+  advance(8 * MIN);
+  played(sess, ['C', 'D'], ['E', 'X']);
+  const first = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(onCourt(first).sort(), ['A', 'C', 'D', 'E'], 'B sits this one out');
+  assert.deepEqual(Engine.waitingPool(sess), ['B']);
+
+  advance(12 * MIN);
+  Engine.completeGame(first, 11, 4);
+  const second = Engine.fillCourts(sess, byId)[0];
+  assert.ok(onCourt(second).includes('B'), 'B has waited longest and cannot be skipped again');
+});
+
+test('the same scenario with match by skill off: the old lock stands and B plays', () => {
+  const byId = levelled({ A: '3.0', B: '4.5', C: '3.0', D: '3.0', E: '3.0', X: '3.0', Y: '3.0', Z: '3.0' });
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  played(sess, ['A', 'X'], ['Y', 'Z']);
+  advance(2 * MIN);
+  played(sess, ['B', 'X'], ['Y', 'Z']);
+  advance(8 * MIN);
+  played(sess, ['C', 'D'], ['E', 'X']);
+  const four = onCourt(Engine.fillCourts(sess, byId)[0]);
+  assert.ok(four.includes('A') && four.includes('B'), 'both locked in, as before');
+});
+
+test('match by skill: a fixed pair stays together and counts as two ratings on the court', () => {
+  // P & Q (3.0s) are a pair and have waited longest. R, S (3.0) and T, U
+  // (4.5) just sat down. The court is the pair plus the two 3.0s.
+  const byId = levelled({ P: '3.0', Q: '3.0', R: '3.0', S: '3.0', T: '4.5', U: '4.5', X: '3.0', Y: '3.0' });
+  const sess = session(['P', 'Q', 'R', 'S', 'T', 'U'], 1);
+  sess.matchBySkill = true;
+  sess.pairs = [['P', 'Q']];
+  played(sess, ['P', 'Q'], ['X', 'Y']);
+  advance(10 * MIN);
+  played(sess, ['R', 'T'], ['S', 'U']);
+  const game = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(onCourt(game).sort(), ['P', 'Q', 'R', 'S']);
+  assert.ok(sameTeam(game, 'P', 'Q'));
+});
+
+test('match by skill: a lone single with only pairs behind them gives way, and stays first', () => {
+  const byId = levelled({ S: '3.5', A: '3.5', B: '3.5', C: '3.5', D: '3.5', X: '3.5', Y: '3.5', Z: '3.5' });
+  const sess = session(['S', 'A', 'B', 'C', 'D'], 1);
+  sess.matchBySkill = true;
+  sess.pairs = [['A', 'B'], ['C', 'D']];
+  played(sess, ['S', 'X'], ['Y', 'Z']);
+  advance(10 * MIN);
+  played(sess, ['A', 'B'], ['C', 'D']);
+  const game = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(onCourt(game).sort(), ['A', 'B', 'C', 'D'], 'the court is not left empty');
+  assert.deepEqual(Engine.waitingPool(sess), ['S']);
+});
+
+test('match by skill: nobody waits beyond the line length - the longest wait is seated every time', () => {
+  // Twelve players across all four categories, two courts, random game
+  // lengths. Every court that starts must include whoever had waited
+  // longest at that moment (within the tie window).
+  const table = {};
+  'ABCDEFGHIJKL'.split('').forEach((n, i) => { table[n] = ['1.5', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5', '3.0', '3.5', '4.0', '4.5'][i]; });
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.matchBySkill = true;
+  Engine.fillCourts(sess, byId);
+  for (let round = 0; round < 30; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(2 * MIN + Math.floor(Math.random() * 6 * MIN));
+    Engine.completeGame(g, 11, 6);
+    const pool = Engine.waitingPool(sess);
+    const longest = Math.min(...pool.map((id) => Engine.waitSince(sess, id)));
+    const started = Engine.fillCourts(sess, byId);
+    assert.equal(started.length, 1);
+    const chosen = onCourt(started[0]).map((id) => Engine.waitSince(sess, id));
+    assert.ok(Math.min(...chosen) <= longest + Engine.TIE_WINDOW_MS, `round ${round}: the longest wait was skipped`);
+  }
 });

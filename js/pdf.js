@@ -184,6 +184,7 @@
             return (byId[p[0]] ? byId[p[0]].name : '?') + ' & ' + (byId[p[1]] ? byId[p[1]].name : '?');
           }).join(', '), 8, false);
         }
+        if (sess.matchBySkill) doc.text(MARGIN, 'Courts were matched by skill level.', 8, false);
         doc.space(2);
         writeStandings(doc, Engine.rankStandings(Engine.computeStats([sess]), byId, null));
         doc.space(8);

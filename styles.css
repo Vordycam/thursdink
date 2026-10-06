@@ -291,3 +291,8 @@ table.lb tbody tr:hover { background: var(--bg); }
   flex: 1 1 130px; min-height: 44px; font-size: 1rem; padding: 8px;
   border: 1px solid var(--line); border-radius: 10px; background: #fff;
 }
+
+/* ---------- Match by skill ---------- */
+.btn.on { background: #dcfce7; border-color: #86efac; color: var(--green-dark); }
+/* Skill level beside a name, shown while matching by skill. */
+.lvl { font-size: .78em; font-weight: 700; color: var(--muted); font-variant-numeric: tabular-nums; }

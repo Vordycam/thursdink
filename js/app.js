@@ -45,6 +45,30 @@
     return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
   }
 
+  /* "3.5 Novice": the level and the group's name for it. */
+  function skillText(skill) {
+    var cat = Engine.skillCategory(skill);
+    return esc(skill) + (cat ? ' ' + esc(cat) : '');
+  }
+
+  /* Skill picker options, grouped by category. */
+  function skillOptions(selected) {
+    return Engine.SKILL_CATEGORIES.map(function (c) {
+      var opts = Engine.SKILL_LEVELS.filter(function (s) { return Engine.skillCategory(s) === c.name; })
+        .map(function (s) {
+          return '<option value="' + s + '"' + (s === selected ? ' selected' : '') + '>' + s + '</option>';
+        }).join('');
+      return '<optgroup label="' + esc(c.name) + ' (' + c.from + ' to ' + c.to + ')">' + opts + '</optgroup>';
+    }).join('');
+  }
+
+  /* "Beginner 1.0–2.5 · Novice 3.0–3.5 · ..." */
+  function categoriesLine() {
+    return Engine.SKILL_CATEGORIES.map(function (c) {
+      return esc(c.name) + ' ' + c.from + '&ndash;' + c.to;
+    }).join(' &middot; ');
+  }
+
   function toast(msg) {
     var el = document.getElementById('toast');
     el.textContent = msg;
@@ -102,7 +126,7 @@
       return '<label class="check-row">' +
         '<input type="checkbox" class="setup-player" value="' + p.id + '" checked> ' +
         '<span class="check-name">' + esc(p.name) + '</span>' +
-        '<span class="muted">' + esc(p.skill) + '</span>' +
+        '<span class="muted">' + skillText(p.skill) + '</span>' +
         '</label>';
     }).join('');
     return '<div class="card">' +
@@ -121,6 +145,11 @@
       '<p class="muted small-note pairs-help">For anyone who wants to keep one partner all night. ' +
       'Partners go on together every game and count as one entry in the waiting line.</p>' +
       '<div id="setup-pairs"></div></div>' +
+      '<div class="field"><label>Matching <span class="muted">(optional)</span></label>' +
+      '<label class="check-row"><input type="checkbox" id="setup-skill-match"> ' +
+      '<span class="check-name">Match by skill</span></label>' +
+      '<p class="muted small-note">Courts are made of players close in rating. Whoever has waited longest ' +
+      'still plays next; the other seats go to the closest-rated players waiting.</p></div>' +
       '<button class="btn primary big" data-action="start-session">Start session</button>' +
       '</div>';
   }
@@ -175,21 +204,23 @@
     return rows + picker;
   }
 
-  /* `fixed` (from Engine.fixedPairs) tags a team that is a fixed pair. */
-  function teamNames(team, byId, fixed) {
+  /* `fixed` (from Engine.fixedPairs) tags a team that is a fixed pair;
+     `levels` adds each player's skill level, shown while matching by skill. */
+  function teamNames(team, byId, fixed, levels) {
     var html = team.map(function (id) {
-      return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>';
+      return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>' +
+        (levels && byId[id] ? ' <span class="lvl">' + esc(byId[id].skill) + '</span>' : '');
     }).join(' &amp; ');
     if (fixed && team.length === 2 && fixed[team[0]] === team[1]) html += ' <span class="pair-tag">pair</span>';
     return html;
   }
 
-  function renderActiveGameCard(m, byId, fixed) {
+  function renderActiveGameCard(m, byId, fixed, levels) {
     var scoreRow = function (side, team) {
       var v = side === 'A' ? m.scoreA : m.scoreB;
       var val = (v === null || v === undefined) ? '' : v;
       return '<div class="team-row">' +
-        '<div class="team-names">' + teamNames(team, byId, fixed) + '</div>' +
+        '<div class="team-names">' + teamNames(team, byId, fixed, levels) + '</div>' +
         '<div class="score-ctl">' +
         '<button class="step-btn" data-action="score-step" data-match="' + m.id + '" data-side="' + side + '" data-d="-1">&minus;</button>' +
         '<input type="number" class="score-input" inputmode="numeric" min="0" max="99" ' +
@@ -243,6 +274,7 @@
     var counts = Engine.sessionCounts(session);
     var fixed = Engine.fixedPairs(session);
     var pairCount = (session.pairs || []).length;
+    var skill = Engine.matchBySkill(session);
 
     // The line as units: a fixed pair is one entry. Anyone held back because
     // their partner is still on court is listed separately, after the line.
@@ -257,6 +289,7 @@
       '<div class="session-bar-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
+      '<button class="btn small' + (skill ? ' on' : '') + '" data-action="toggle-skill-match">Skill match: ' + (skill ? 'On' : 'Off') + '</button>' +
       '<button class="btn small danger-outline" data-action="end-session">End session</button>' +
       '</div></div>';
 
@@ -264,7 +297,7 @@
     for (var c = 1; c <= session.courtCount; c++) {
       var g = null;
       actives.forEach(function (a) { if (a.court === c) g = a; });
-      html += g ? renderActiveGameCard(g, byId, fixed) : renderFreeCourtCard(c, pool.length, readyCount);
+      html += g ? renderActiveGameCard(g, byId, fixed, skill) : renderFreeCourtCard(c, pool.length, readyCount);
     }
     html += '</div>';
 
@@ -275,7 +308,10 @@
       // who can actually go on; someone held for a partner gets no colour.
       var bands = Engine.waitBands(ready);
       var chip = function (u, band, label) {
-        var names = u.ids.map(function (id) { return esc(byId[id] ? byId[id].name : '?'); }).join(' &amp; ');
+        var names = u.ids.map(function (id) {
+          return esc(byId[id] ? byId[id].name : '?') +
+            (skill && byId[id] ? ' <span class="lvl">' + esc(byId[id].skill) + '</span>' : '');
+        }).join(' &amp; ');
         var games = Math.max.apply(null, u.ids.map(function (id) { return counts.games[id] || 0; }));
         return '<span class="chip chip-' + band + '" data-since="' + u.since + '">' +
           (label ? '<span class="muted">' + label + '</span> ' : '') + names +
@@ -295,7 +331,9 @@
         '<span class="legend legend-yellow">Yellow</span> next &middot; ' +
         '<span class="legend legend-green">Green</span> most recent to sit down or arrive. ' +
         'Time = how long they have been waiting; brackets = games played.' +
-        (pairCount ? ' Fixed partners are one entry and go on together.' : '') + '</div></div>';
+        (pairCount ? ' Fixed partners are one entry and go on together.' : '') +
+        (skill ? ' Match by skill is on: the longest wait plays next, and the other seats go to the closest-rated players waiting.' : '') +
+        '</div></div>';
     }
 
     if (finished.length) {
@@ -367,15 +405,13 @@
     var roster = DB.players.filter(function (p) { return !p.archived; });
     var archived = DB.players.filter(function (p) { return p.archived; });
 
-    var skillOpts = Engine.SKILL_LEVELS.map(function (s) {
-      return '<option value="' + s + '"' + (s === '3.5' ? ' selected' : '') + '>' + s + '</option>';
-    }).join('');
+    var skillOpts = skillOptions('3.5');
 
     var rows = roster.map(function (p) {
       var s = stats[p.id] || { games: 0, wins: 0, losses: 0 };
       return '<div class="player-row" data-action="player-detail" data-player="' + p.id + '">' +
         '<div class="player-main"><strong>' + esc(p.name) + '</strong>' +
-        '<span class="muted">skill ' + esc(p.skill) + ' &middot; rating ' + p.rating + ' &middot; ' +
+        '<span class="muted">skill ' + skillText(p.skill) + ' &middot; rating ' + p.rating + ' &middot; ' +
         s.wins + 'W&ndash;' + s.losses + 'L</span></div>' +
         '<button class="btn small" data-action="edit-player" data-player="' + p.id + '">Edit</button>' +
         '</div>';
@@ -395,7 +431,8 @@
       '<input type="text" id="new-player-name" placeholder="Player name" maxlength="30">' +
       '<select id="new-player-skill" title="Skill level">' + skillOpts + '</select>' +
       '<button class="btn primary" data-action="add-player">Add</button>' +
-      '</div><p class="muted small-note">Skill sets the starting rating; it adjusts automatically from results.</p></div>' +
+      '</div><p class="muted small-note">Skill sets the starting rating; it adjusts automatically from results. ' +
+      'Levels: ' + categoriesLine() + '.</p></div>' +
       '<div class="card"><h2>Roster (' + roster.length + ')</h2>' +
       (rows || '<p class="muted">No players yet.</p>') + archivedHtml + '</div>';
   }
@@ -487,7 +524,7 @@
 
     openModal(
       '<h2>' + esc(p.name) + '</h2>' +
-      '<p class="muted">Skill ' + esc(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong></p>' +
+      '<p class="muted">Skill ' + skillText(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong></p>' +
       sparkline(p.ratingHistory) +
       '<div class="stat-grid">' +
       '<div class="stat-box"><div class="stat-num">' + s.games + '</div><div class="stat-lbl">Games</div></div>' +
@@ -513,6 +550,7 @@
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
+      (sess.matchBySkill ? '<p class="muted small-note">Courts were matched by skill level.</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
     );
@@ -521,9 +559,7 @@
   function showEditPlayer(playerId) {
     var p = playersById()[playerId];
     if (!p) return;
-    var skillOpts = Engine.SKILL_LEVELS.map(function (s) {
-      return '<option value="' + s + '"' + (s === p.skill ? ' selected' : '') + '>' + s + '</option>';
-    }).join('');
+    var skillOpts = skillOptions(p.skill);
     openModal(
       '<h2>Edit player</h2>' +
       '<div class="field"><label>Name</label>' +
@@ -547,7 +583,7 @@
       return '<label class="check-row">' +
         '<input type="checkbox" class="manage-player" value="' + p.id + '"' + (inSess ? ' checked' : '') + '> ' +
         '<span class="check-name">' + esc(p.name) + '</span>' +
-        '<span class="muted">' + esc(p.skill) + '</span></label>';
+        '<span class="muted">' + skillText(p.skill) + '</span></label>';
     }).join('');
     openModal(
       '<h2>Session players</h2>' +
@@ -702,6 +738,7 @@
       playerIds: ids,
       playerMeta: {},
       pairs: setupPairs.filter(function (p) { return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0; }),
+      matchBySkill: !!(document.getElementById('setup-skill-match') && document.getElementById('setup-skill-match').checked),
       games: [],
       nextSeq: 1,
       status: 'active'
@@ -852,6 +889,19 @@
     toast('Pair split.' + (started.length ? ' A free court just filled.' : ''));
   }
 
+  /* Flip match by skill for the running session. Games in progress are not
+     touched; the next court to free up is built the new way. */
+  function toggleSkillMatch() {
+    var session = activeSession();
+    if (!session) return;
+    session.matchBySkill = !session.matchBySkill;
+    persist();
+    renderPlay();
+    toast(session.matchBySkill
+      ? 'Match by skill is on. From the next game, courts are made of players close in rating.'
+      : 'Match by skill is off. Longest wait first, as before.');
+  }
+
   function endSession() {
     var session = activeSession();
     if (!session) return;
@@ -980,6 +1030,7 @@
       case 'manage-partners': { var ps = activeSession(); if (ps) showPartners(ps); break; }
       case 'add-pair': addPair(); break;
       case 'remove-pair': removePair(t.getAttribute('data-player')); break;
+      case 'toggle-skill-match': toggleSkillMatch(); break;
       case 'end-session': endSession(); break;
       case 'add-player': addPlayer(); break;
       case 'edit-player': e.stopPropagation(); showEditPlayer(t.getAttribute('data-player')); break;

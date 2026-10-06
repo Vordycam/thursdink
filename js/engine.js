@@ -4,13 +4,37 @@
    the clock; team-making maximizes partner/opponent variety and competitive
    balance among players who have waited the same length of time. Two people
    may opt to be fixed partners for the night: they are then one unit in the
-   line and always land on the same team. */
+   line and always land on the same team. A session may also match by skill:
+   courts are then built around the longest wait from the players closest to
+   them in rating. */
 (function () {
   'use strict';
 
-  /* USA Pickleball skill scale, 2.0 through 5.5, mapped onto a rating ladder. */
-  var SKILL_RATINGS = { '2.0': 900, '2.5': 1000, '3.0': 1100, '3.5': 1250, '4.0': 1400, '4.5': 1550, '5.0': 1700, '5.5': 1850 };
+  /* USA Pickleball skill scale, 1.0 through 5.5, mapped onto a rating ladder. */
+  var SKILL_RATINGS = {
+    '1.0': 700, '1.5': 800, '2.0': 900, '2.5': 1000, '3.0': 1100,
+    '3.5': 1250, '4.0': 1400, '4.5': 1550, '5.0': 1700, '5.5': 1850
+  };
+  var SKILL_LEVELS = ['1.0', '1.5', '2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5'];
   var ELO_K = 32;
+
+  /* The group's names for spans of the scale, lowest first. */
+  var SKILL_CATEGORIES = [
+    { name: 'Beginner', from: '1.0', to: '2.5' },
+    { name: 'Novice', from: '3.0', to: '3.5' },
+    { name: 'Intermediate', from: '4.0', to: '4.5' },
+    { name: 'Expert', from: '5.0', to: '5.5' }
+  ];
+
+  /* Category name for a skill level, or '' for anything off the scale. */
+  function skillCategory(skill) {
+    var v = parseFloat(skill);
+    for (var i = 0; i < SKILL_CATEGORIES.length; i++) {
+      var c = SKILL_CATEGORIES[i];
+      if (v >= parseFloat(c.from) && v <= parseFloat(c.to)) return c.name;
+    }
+    return '';
+  }
 
   /* The group plays first to 11, straight up - the game ends the moment a
      side reaches 11, so 11-10 is a result. This is the group's own format,
@@ -37,6 +61,28 @@
   var TIE_WINDOW_MS = 60 * 1000;
   var LEAPFROG_PENALTY = 60;
   var TIER_WINDOW = 2;
+
+  /*
+   * Match by skill is a per-session option, off unless the organiser turns
+   * it on. With it on, a court is built around whoever has waited longest -
+   * they always play next - and the other seats go to the waiting players
+   * closest to them in rating, so each game is between people of about the
+   * same level. Anyone passed over is charged once (not once per seat):
+   * LEAPFROG_PENALTY, plus SKILL_WAIT_PENALTY for every minute they have
+   * waited longer than the player taken instead. So a long wait keeps its
+   * weight: half a level is not reason enough to skip someone who has sat
+   * about five minutes longer, a full level is not enough beyond about a
+   * quarter of an hour, and once they have waited longest nobody can skip
+   * them at all. SKILL_SPREAD_WEIGHT is the cost per rating point between
+   * the strongest and weakest player on the court; half a level is 100 to
+   * 150 points.
+   */
+  var SKILL_SPREAD_WEIGHT = 1;
+  var SKILL_WAIT_PENALTY = 20;
+
+  function matchBySkill(session) {
+    return !!session.matchBySkill;
+  }
 
   function initialRating(skill) {
     return SKILL_RATINGS[skill] || 1250;
@@ -371,10 +417,31 @@
     return a.since - b.since;
   }
 
+  /* Rating gap between the strongest and weakest of the four. */
+  function courtSpread(four, ratingOf) {
+    var lo = Infinity, hi = -Infinity;
+    four.forEach(function (id) {
+      var r = ratingOf(id);
+      if (r < lo) lo = r;
+      if (r > hi) hi = r;
+    });
+    return hi - lo;
+  }
+
+  /* Cost of seating `chosen` while `other` keeps waiting, when matching by
+     skill. Waits within the tie window count as equal and fall to the usual
+     entitlement; beyond it, every minute `other` has waited longer adds up. */
+  function skillLeapfrogCost(other, chosen) {
+    var gap = chosen.since - other.since;
+    if (gap > TIE_WINDOW_MS) return LEAPFROG_PENALTY + SKILL_WAIT_PENALTY * gap / 60000;
+    if (gap < -TIE_WINDOW_MS) return 0;
+    return outranks(other, chosen) ? LEAPFROG_PENALTY : 0;
+  }
+
   /* Best court from the locked units plus a pick from the candidates that
      brings the count to four. Null when no pick fits - an odd number of
      seats with only pairs to fill them. */
-  function pickCourt(locked, candidates, counts, ratingOf, fixed) {
+  function pickCourt(locked, candidates, counts, ratingOf, fixed, skill) {
     var need = 4 - countIds(locked);
     var best = null, bestCost = Infinity;
     pickCombos(candidates, need).forEach(function (pick) {
@@ -383,11 +450,22 @@
       var split = bestSplitOfFour(four, counts, ratingOf, fixed);
       if (!split.teams) return;
       var cost = split.cost;
-      pick.forEach(function (chosen) {
+      if (skill) {
+        // A unit passed over is charged once, by its strongest grievance.
+        cost += courtSpread(four, ratingOf) * SKILL_SPREAD_WEIGHT;
         candidates.forEach(function (other) {
-          if (pick.indexOf(other) < 0 && outranks(other, chosen)) cost += LEAPFROG_PENALTY;
+          if (pick.indexOf(other) >= 0) return;
+          var worst = 0;
+          pick.forEach(function (chosen) { worst = Math.max(worst, skillLeapfrogCost(other, chosen)); });
+          cost += worst;
         });
-      });
+      } else {
+        pick.forEach(function (chosen) {
+          candidates.forEach(function (other) {
+            if (pick.indexOf(other) < 0 && outranks(other, chosen)) cost += LEAPFROG_PENALTY;
+          });
+        });
+      }
       if (cost < bestCost) { bestCost = cost; best = split.teams; }
     });
     return best;
@@ -408,6 +486,11 @@
    * court empty, the locked unit with the weakest claim (most games, then
    * shortest wait) gives way and becomes an ordinary candidate; it is still
    * first in line for the next court.
+   *
+   * Matching by skill keeps one hard claim instead of a locked tier: the
+   * unit that has waited longest (fewest games within the tie window) always
+   * plays, and every other waiting unit is a candidate for the remaining
+   * seats, weighed by rating fit against how much longer they have waited.
    */
   function nextGame(session, playersById) {
     var ranked = rankUnits(session, playersById, true);
@@ -415,21 +498,31 @@
     var units = ranked.units.filter(function (u) { return !u.waitingFor; });
     if (countIds(units) < 4) return null;
     var fixed = fixedPairs(session);
+    var skill = matchBySkill(session);
 
     function ratingOf(id) {
       return (playersById[id] && playersById[id].rating) || 1250;
     }
 
-    var pivot = 0, seen = 0;
-    for (var i = 0; i < units.length; i++) {
-      seen += units[i].ids.length;
-      if (seen >= 4) { pivot = units[i].since; break; }
-    }
     var locked = [], tier = [];
-    units.forEach(function (u) {
-      if (u.since < pivot - TIE_WINDOW_MS) locked.push(u);
-      else if (u.since <= pivot + TIE_WINDOW_MS) tier.push(u);
-    });
+    if (skill) {
+      var head = units[0];
+      units.forEach(function (u) {
+        if (u.since <= units[0].since + TIE_WINDOW_MS && outranks(u, head)) head = u;
+      });
+      locked.push(head);
+      tier = units.filter(function (u) { return u !== head; });
+    } else {
+      var pivot = 0, seen = 0;
+      for (var i = 0; i < units.length; i++) {
+        seen += units[i].ids.length;
+        if (seen >= 4) { pivot = units[i].since; break; }
+      }
+      units.forEach(function (u) {
+        if (u.since < pivot - TIE_WINDOW_MS) locked.push(u);
+        else if (u.since <= pivot + TIE_WINDOW_MS) tier.push(u);
+      });
+    }
 
     for (;;) {
       tier.sort(byEntitlement);
@@ -439,9 +532,9 @@
         covered += tier[j].ids.length;
         if (covered >= need) { k = j + 1; break; }
       }
-      var candidates = tier.slice(0, k + TIER_WINDOW);
-      var teams = pickCourt(locked, candidates, counts, ratingOf, fixed) ||
-        pickCourt(locked, tier, counts, ratingOf, fixed);
+      var candidates = skill ? tier : tier.slice(0, k + TIER_WINDOW);
+      var teams = pickCourt(locked, candidates, counts, ratingOf, fixed, skill);
+      if (!teams && candidates.length < tier.length) teams = pickCourt(locked, tier, counts, ratingOf, fixed, skill);
       if (teams) return { teamA: teams[0], teamB: teams[1] };
       // With nobody locked the tier holds four or more players, and any four
       // or more players can always be seated - so this loop always ends.
@@ -732,8 +825,11 @@
     computeStats: computeStats,
     sessionParticipants: sessionParticipants,
     rankStandings: rankStandings,
+    matchBySkill: matchBySkill,
+    skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,
-    SKILL_LEVELS: ['2.0', '2.5', '3.0', '3.5', '4.0', '4.5', '5.0', '5.5']
+    SKILL_LEVELS: SKILL_LEVELS,
+    SKILL_CATEGORIES: SKILL_CATEGORIES
   };
 })();

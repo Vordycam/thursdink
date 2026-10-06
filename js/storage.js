@@ -77,6 +77,7 @@
   }
 
   window.Storage_ = {
+    defaultData: defaultData,
     load: load,
     save: save,
     exportJson: exportJson,

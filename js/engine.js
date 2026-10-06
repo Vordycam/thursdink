@@ -715,6 +715,22 @@
     return stats;
   }
 
+  /*
+   * Start over for a new season: every session is deleted and each player
+   * goes back to the rating their skill level starts at, with no history.
+   * Names, levels and archived flags are kept. Returns what was cleared so
+   * the caller can say so.
+   */
+  function resetProgress(data) {
+    var sessions = (data.sessions || []).length;
+    data.sessions = [];
+    (data.players || []).forEach(function (p) {
+      p.rating = initialRating(p.skill);
+      p.ratingHistory = [];
+    });
+    return { sessions: sessions, players: (data.players || []).length };
+  }
+
   /* Everyone who was part of a session: still checked in, or finished a game
      before leaving. Used for the "N players" figure and the standings. */
   function sessionParticipants(session) {
@@ -825,6 +841,7 @@
     computeStats: computeStats,
     sessionParticipants: sessionParticipants,
     rankStandings: rankStandings,
+    resetProgress: resetProgress,
     matchBySkill: matchBySkill,
     skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,

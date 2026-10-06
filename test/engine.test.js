@@ -811,3 +811,32 @@ test('match by skill: nobody waits beyond the line length - the longest wait is 
     assert.ok(Math.min(...chosen) <= longest + Engine.TIE_WINDOW_MS, `round ${round}: the longest wait was skipped`);
   }
 });
+
+/* ── start over ───────────────────────────────────────────────────────── */
+
+test('resetProgress deletes every session and returns each player to their starting rating', () => {
+  const data = {
+    version: 1,
+    players: [
+      { id: 'A', name: 'Ann', skill: '3.5', rating: 1312, ratingHistory: [{ t: 1, r: 1280 }, { t: 2, r: 1312 }], archived: false },
+      { id: 'B', name: 'Ben', skill: '4.5', rating: 1490, ratingHistory: [{ t: 1, r: 1490 }], archived: true },
+      { id: 'C', name: 'Cal', skill: '2.0', rating: 940 },            // saved before ratingHistory existed
+    ],
+    sessions: [session(['A', 'B', 'C', 'D']), session(['A', 'B', 'C', 'D'])],
+  };
+  data.sessions[0].status = 'done';
+  data.sessions[1].status = 'done';
+
+  const r = Engine.resetProgress(data);
+  assert.deepEqual(r, { sessions: 2, players: 3 });
+  assert.deepEqual(data.sessions, []);
+  assert.equal(data.players.length, 3, 'the roster is kept');
+  assert.deepEqual(data.players.map((p) => [p.name, p.skill, p.archived]),
+    [['Ann', '3.5', false], ['Ben', '4.5', true], ['Cal', '2.0', undefined]], 'names, levels and archived flags untouched');
+  assert.deepEqual(data.players.map((p) => p.rating), [1250, 1550, 900], 'each back to the rating their level starts at');
+  data.players.forEach((p) => assert.deepEqual(p.ratingHistory, [], p.name + ' has no history'));
+  assert.deepEqual(Engine.computeStats(data.sessions), {}, 'no stats remain');
+
+  assert.deepEqual(Engine.resetProgress({ players: [], sessions: [] }), { sessions: 0, players: 0 }, 'an empty store is fine');
+  assert.deepEqual(Engine.resetProgress({}), { sessions: 0, players: 0 }, 'so is a bare object');
+});

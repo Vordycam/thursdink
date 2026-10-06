@@ -480,7 +480,16 @@
       '<button class="btn" data-action="export-data">Export backup (JSON)</button>' +
       '<button class="btn" data-action="import-data">Import backup</button>' +
       '<input type="file" id="import-file" accept=".json,application/json" hidden>' +
-      '</div></div>';
+      '</div></div>' +
+      '<div class="card"><h2>Start over</h2>' +
+      '<p class="muted small-note">For a new season. Export a backup first if you might want today\'s numbers back.</p>' +
+      '<div class="setup-actions">' +
+      '<button class="btn danger-outline" data-action="reset-progress">Reset sessions and stats</button>' +
+      '<button class="btn danger-outline" data-action="reset-everything">Erase everything</button>' +
+      '</div>' +
+      '<p class="muted small-note">Reset keeps the roster: names and skill levels stay, every rating goes back to ' +
+      'its starting value and all sessions are deleted. Erase removes the players too. ' +
+      'Neither can be undone, and neither runs while a session is in progress.</p></div>';
   }
 
   /* ---------- Detail modals ---------- */
@@ -951,6 +960,32 @@
     renderAll();
   }
 
+  /* Both resets refuse while a session is running: ending it is a separate,
+     visible step, and the Play tab should never change under someone's
+     hands. Each asks once, with the numbers it is about to delete. */
+  function resetProgress() {
+    if (activeSession()) { toast('End the running session first (Play tab).'); return; }
+    var n = DB.sessions.length;
+    if (!confirm('Delete all ' + n + ' session(s) and put every player back to their starting rating, ' +
+      'with no history? Names and skill levels are kept. This cannot be undone.')) return;
+    var r = Engine.resetProgress(DB);
+    persist();
+    closeModal();
+    renderAll();
+    toast(r.sessions + ' session(s) deleted. ' + r.players + ' player(s) back to their starting rating.');
+  }
+
+  function resetEverything() {
+    if (activeSession()) { toast('End the running session first (Play tab).'); return; }
+    if (!confirm('Erase everything: ' + DB.players.length + ' player(s) and ' + DB.sessions.length +
+      ' session(s)? This cannot be undone. Export a backup first if you might want it back.')) return;
+    DB = Storage_.defaultData();
+    persist();
+    closeModal();
+    renderAll();
+    toast('All data erased.');
+  }
+
   function importData() {
     var input = document.getElementById('import-file');
     input.onchange = function () {
@@ -1046,6 +1081,8 @@
       case 'export-pdf': PdfReport.download(DB); toast('PDF report downloaded.'); break;
       case 'export-data': Storage_.exportJson(DB); toast('Backup file downloaded.'); break;
       case 'import-data': importData(); break;
+      case 'reset-progress': resetProgress(); break;
+      case 'reset-everything': resetEverything(); break;
       case 'close-modal': closeModal(); break;
     }
   });

@@ -50,6 +50,8 @@ html, body {
   border-bottom: 3px solid transparent; cursor: pointer;
 }
 .tab-btn.active { color: #fff; border-bottom-color: var(--ball); }
+/* Four tabs on a narrow phone: "Tournament" must still fit on one line. */
+@media (max-width: 420px) { .tab-btn { font-size: .9rem; padding: 12px 4px; } }
 
 /* ---------- Layout ---------- */
 main { max-width: 760px; margin: 0 auto; padding: 14px 12px 90px; }
@@ -318,3 +320,25 @@ table.prog th { font-size: .72rem; text-transform: uppercase; letter-spacing: .0
 table.prog th:first-child, table.prog td:first-child { text-align: left; }
 .delta-up { color: var(--win); font-weight: 700; }
 .delta-down { color: var(--danger); font-weight: 700; }
+
+/* ---------- Tournament ---------- */
+.tour-intro { margin: 0 0 14px; }
+/* Check-in list grouped by division. */
+.division-group { padding: 2px 0 6px; }
+.division-group + .division-group { border-top: 1px solid var(--line); margin-top: 4px; }
+.division-head { padding: 8px 12px 2px; }
+.division-count.warn { color: var(--danger); font-weight: 600; }
+.division-empty { margin: 4px 12px 6px; }
+/* Live view: one pill per division, a badge on each court and result. */
+.division-strip { display: flex; gap: 8px; flex-wrap: wrap; margin: 0 0 12px; }
+.division-pill {
+  background: var(--card); border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 12px; font-weight: 700; font-size: .9rem;
+}
+.division-tag {
+  display: inline-block; font-size: .68rem; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: #fff; background: var(--green);
+  border-radius: 6px; padding: 2px 7px; vertical-align: middle;
+}
+.division-line-head { margin-bottom: 6px; }
+.tour-legend { margin: 0 0 12px; }

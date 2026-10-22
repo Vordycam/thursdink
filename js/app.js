@@ -1,4 +1,4 @@
-/* App: UI wiring for Play / Players / Stats views (continuous court flow). */
+/* App: UI wiring for Play / Tournament / Players / Stats views (continuous court flow). */
 (function () {
   'use strict';
 
@@ -32,6 +32,14 @@
       if (DB.sessions[i].status === 'active') return DB.sessions[i];
     }
     return null;
+  }
+
+  /* For the actions that refuse while something is running: which tab it is on. */
+  function endFirstMessage() {
+    var s = activeSession();
+    return s && s.tournament
+      ? 'End the running tournament first (Tournament tab).'
+      : 'End the running session first (Play tab).';
   }
 
   function esc(s) {
@@ -148,15 +156,35 @@
   /* Pairs chosen on the setup screen, applied when the session starts. */
   var setupPairs = [];
 
+  /* The Play and Tournament tabs both reflect the live session, so they are
+     always redrawn together: the tab the session belongs to shows it, and
+     the other says where it is. */
   function renderPlay() {
     var view = document.getElementById('view-play');
     var session = activeSession();
     if (!session) {
       view.innerHTML = renderSessionSetup();
       renderSetupPairs();
+    } else if (session.tournament) {
+      view.innerHTML = renderElsewhereCard(session);
     } else {
       view.innerHTML = renderActiveSession(session);
     }
+    renderTournament();
+  }
+
+  /* Shown on the Play tab while a tournament runs, and on the Tournament
+     tab while a regular session runs: they use the same courts. */
+  function renderElsewhereCard(session) {
+    var tour = !!session.tournament;
+    return '<div class="card empty-state">' +
+      '<h2>' + (tour ? 'A tournament is in progress' : 'A session is in progress') + '</h2>' +
+      '<p class="muted">' + fmtDate(session.startedAt) + ' &middot; ' + session.playerIds.length + ' players &middot; ' +
+      session.courtCount + ' courts.<br>' +
+      (tour ? 'Courts, scores and the waiting lines are on the Tournament tab.'
+        : 'A tournament uses the same courts, so end the session on the Play tab first.') + '</p>' +
+      '<button class="btn primary" data-action="' + (tour ? 'goto-tournament' : 'goto-play') + '">' +
+      (tour ? 'Open the Tournament tab' : 'Open the Play tab') + '</button></div>';
   }
 
   function renderSessionSetup() {
@@ -217,9 +245,12 @@
   }
 
   /* Current pairs, each with a Split button, plus a picker to add one from
-     whoever is unpaired. Shared by session setup and the in-session modal. */
-  function pairsBlockHtml(pairs, ids, byId) {
+     whoever is unpaired. Shared by session setup, tournament setup and the
+     in-session modal. `labelOf` can add to a name in the picker (the
+     tournament shows each player's division beside it). */
+  function pairsBlockHtml(pairs, ids, byId, labelOf) {
     function name(id) { return byId[id] ? byId[id].name : '?'; }
+    var label = labelOf || name;
     var paired = {};
     pairs.forEach(function (p) { paired[p[0]] = true; paired[p[1]] = true; });
     var free = ids.filter(function (id) { return !paired[id] && byId[id]; });
@@ -236,7 +267,7 @@
     if (free.length >= 2) {
       var opts = function (placeholder) {
         return '<option value="">' + placeholder + '</option>' + free.map(function (id) {
-          return '<option value="' + id + '">' + esc(name(id)) + '</option>';
+          return '<option value="' + id + '">' + esc(label(id)) + '</option>';
         }).join('');
       };
       picker = '<div class="pair-add">' +
@@ -250,8 +281,14 @@
     return rows + picker;
   }
 
+  /* The division badge on a tournament court or result; nothing otherwise. */
+  function divisionTag(badge) {
+    return badge ? ' <span class="division-tag">' + esc(badge) + '</span>' : '';
+  }
+
   /* `fixed` (from Engine.fixedPairs) tags a team that is a fixed pair;
-     `levels` adds each player's skill level, shown while matching by skill. */
+     `levels` adds each player's skill level, shown while matching by skill
+     and in a tournament. `badge`, in a tournament, names the court's division. */
   function teamNames(team, byId, fixed, levels) {
     var html = team.map(function (id) {
       return '<span class="pname">' + esc(byId[id] ? byId[id].name : '?') + '</span>' +
@@ -261,7 +298,7 @@
     return html;
   }
 
-  function renderActiveGameCard(m, byId, fixed, levels) {
+  function renderActiveGameCard(m, byId, fixed, levels, badge) {
     var scoreRow = function (side, team) {
       var v = side === 'A' ? m.scoreA : m.scoreB;
       var val = (v === null || v === undefined) ? '' : v;
@@ -275,7 +312,7 @@
         '</div></div>';
     };
     return '<div class="match-card">' +
-      '<div class="court-label">Court ' + m.court + '</div>' +
+      '<div class="court-label">Court ' + m.court + divisionTag(badge) + '</div>' +
       scoreRow('A', m.teamA) +
       '<div class="vs">vs</div>' +
       scoreRow('B', m.teamB) +
@@ -287,22 +324,27 @@
       '</div></div>';
   }
 
-  function renderFreeCourtCard(court, poolCount, readyCount) {
-    var why;
-    if (poolCount === 0) why = 'no one is waiting.';
-    else if (readyCount < poolCount) {
-      why = readyCount + ' of ' + poolCount + ' waiting are ready, needs 4. ' +
+  function freeCourtReason(poolCount, readyCount) {
+    if (poolCount === 0) return 'no one is waiting.';
+    if (readyCount < poolCount) {
+      return readyCount + ' of ' + poolCount + ' waiting are ready, needs 4. ' +
         'Someone is held for a partner still on court.';
-    } else why = 'only ' + poolCount + ' waiting, needs 4.';
+    }
+    return 'only ' + poolCount + ' waiting, needs 4.';
+  }
+
+  /* `reason` overrides the usual explanation (a tournament has its own). */
+  function renderFreeCourtCard(court, poolCount, readyCount, reason) {
+    var why = reason || freeCourtReason(poolCount, readyCount);
     return '<div class="match-card free-court">' +
       '<div class="court-label">Court ' + court + '</div>' +
       '<p class="muted free-note">Free &mdash; ' + why + '</p></div>';
   }
 
-  function renderFinishedGameRow(m, byId) {
+  function renderFinishedGameRow(m, byId, badge) {
     var aWon = m.scoreA > m.scoreB;
     return '<div class="finished-row">' +
-      '<span class="finished-court muted">C' + m.court + '</span>' +
+      '<span class="finished-court muted">C' + m.court + divisionTag(badge) + '</span>' +
       '<span class="finished-teams">' +
       '<span class="' + (aWon ? 'fin-win' : '') + '">' + teamNames(m.teamA, byId) + ' ' + m.scoreA + '</span>' +
       ' &ndash; ' +
@@ -310,6 +352,22 @@
       '</span>' +
       '<button class="btn small" data-action="edit-finished" data-match="' + m.id + '">Edit</button>' +
       '</div>';
+  }
+
+  /* One entry in a waiting line: a player or a fixed pair, with their clock,
+     games played, and - with `levels` - each player's skill level. */
+  function waitChip(u, band, label, byId, counts, levels) {
+    var names = u.ids.map(function (id) {
+      return esc(byId[id] ? byId[id].name : '?') +
+        (levels && byId[id] ? ' <span class="lvl">' + esc(byId[id].skill) + '</span>' : '');
+    }).join(' &amp; ');
+    var games = Math.max.apply(null, u.ids.map(function (id) { return counts.games[id] || 0; }));
+    return '<span class="chip chip-' + band + '" data-since="' + u.since + '">' +
+      (label ? '<span class="muted">' + label + '</span> ' : '') + names +
+      (u.ids.length > 1 ? ' <span class="pair-tag">pair</span>' : '') +
+      (u.waitingFor ? ' <span class="muted">waiting for ' + esc(byId[u.waitingFor] ? byId[u.waitingFor].name : '?') + '</span>' : '') +
+      ' <span class="wait-time">' + fmtWait(Date.now() - u.since) + '</span>' +
+      ' <span class="muted">(' + games + ')</span></span>';
   }
 
   function renderActiveSession(session) {
@@ -353,19 +411,7 @@
       // just sat down or just arrived. Bands are worked out over the people
       // who can actually go on; someone held for a partner gets no colour.
       var bands = Engine.waitBands(ready);
-      var chip = function (u, band, label) {
-        var names = u.ids.map(function (id) {
-          return esc(byId[id] ? byId[id].name : '?') +
-            (skill && byId[id] ? ' <span class="lvl">' + esc(byId[id].skill) + '</span>' : '');
-        }).join(' &amp; ');
-        var games = Math.max.apply(null, u.ids.map(function (id) { return counts.games[id] || 0; }));
-        return '<span class="chip chip-' + band + '" data-since="' + u.since + '">' +
-          (label ? '<span class="muted">' + label + '</span> ' : '') + names +
-          (u.ids.length > 1 ? ' <span class="pair-tag">pair</span>' : '') +
-          (u.waitingFor ? ' <span class="muted">waiting for ' + esc(byId[u.waitingFor] ? byId[u.waitingFor].name : '?') + '</span>' : '') +
-          ' <span class="wait-time">' + fmtWait(Date.now() - u.since) + '</span>' +
-          ' <span class="muted">(' + games + ')</span></span>';
-      };
+      var chip = function (u, band, label) { return waitChip(u, band, label, byId, counts, skill); };
       html += '<div class="sitouts"><span class="sitout-label">Waiting to play, longest wait first:</span> ' +
         ready.map(function (u, i) { return chip(u, bands[i], (i + 1) + '.'); }).join(' ') +
         (held.length
@@ -396,6 +442,257 @@
     if (board) {
       html += '<div class="card"><h3>Session standings</h3>' + board + '</div>';
     }
+    return html;
+  }
+
+  /* ---------- Tournament view ---------- */
+
+  /* Pairs chosen on the tournament setup screen, applied when it starts. */
+  var tourPairs = [];
+
+  function renderTournament() {
+    var view = document.getElementById('view-tournament');
+    if (!view) return;
+    var session = activeSession();
+    if (!session) {
+      view.innerHTML = renderTournamentSetup();
+      renderTournamentPairs();
+      updateTournamentCounts();
+    } else if (session.tournament) {
+      view.innerHTML = renderActiveTournament(session);
+    } else {
+      view.innerHTML = renderElsewhereCard(session);
+    }
+  }
+
+  /* Division names in scale order, the unrated group last. */
+  function divisionNames() {
+    return Engine.SKILL_CATEGORIES.map(function (c) { return c.name; }).concat(['']);
+  }
+
+  /* "3.0–3.5" for a named division, '' for the unrated group. */
+  function divisionRange(name) {
+    var range = '';
+    Engine.SKILL_CATEGORIES.forEach(function (c) { if (c.name === name) range = c.from + '&ndash;' + c.to; });
+    return range;
+  }
+
+  function divisionOf(byId, id) {
+    return Engine.playerCategory(byId, id);
+  }
+
+  /* A game's division: as recorded, or by its players for safety. */
+  function gameDivision(g, byId) {
+    return g.category === undefined ? divisionOf(byId, g.teamA[0]) : g.category;
+  }
+
+  /* Picker label with the division, for the tournament's pair pickers. */
+  function divisionLabelFn(byId) {
+    return function (id) {
+      return (byId[id] ? byId[id].name : '?') + ' (' + Engine.divisionLabel(divisionOf(byId, id)) + ')';
+    };
+  }
+
+  function checkedTournamentIds() {
+    return Array.prototype.slice.call(document.querySelectorAll('.tsetup-player:checked'))
+      .map(function (el) { return el.value; });
+  }
+
+  function renderTournamentSetup() {
+    var roster = DB.players.filter(function (p) { return !p.archived; });
+    var intro = '<div class="card"><h2>Tournament</h2>' +
+      '<p class="muted small-note tour-intro">For tournament nights. Everyone plays only within their division: ' +
+      'Beginners with Beginners, Novices with Novices, and so on, never mixed. Any court can host any division, ' +
+      'and each court card says which one is on it. Within a division, longest wait plays first as usual. ' +
+      'Levels: ' + categoriesLine() + '.</p>';
+    if (roster.length < 4) {
+      return intro + '<div class="empty-state">' +
+        '<p>You need at least 4 players in your roster. You have ' + roster.length + '.</p>' +
+        '<button class="btn primary big" data-action="goto-players">Add players</button>' +
+        '</div></div>';
+    }
+    var groups = divisionNames().map(function (name) {
+      var members = roster.filter(function (p) { return Engine.skillCategory(p.skill) === name; });
+      if (!members.length && !name) return '';
+      var rows = members.map(function (p) {
+        return '<label class="check-row">' +
+          '<input type="checkbox" class="tsetup-player" value="' + p.id + '" data-division="' + esc(name) + '" checked> ' +
+          '<span class="check-name">' + esc(p.name) + '</span>' +
+          '<span class="muted">' + esc(p.skill) + '</span>' +
+          '</label>';
+      }).join('');
+      return '<div class="division-group"><div class="division-head">' +
+        '<strong>' + esc(Engine.divisionLabel(name)) + '</strong>' +
+        (name ? ' <span class="muted">' + divisionRange(name) + '</span>' : '') +
+        ' <span class="muted division-count" data-division="' + esc(name) + '"></span></div>' +
+        (rows || '<p class="muted small-note division-empty">No one at this level in the roster.</p>') +
+        '</div>';
+    }).join('');
+    return intro +
+      '<div class="field"><label>Courts available</label>' +
+      '<div class="court-picker">' +
+      [1, 2, 3, 4, 5, 6].map(function (n) {
+        return '<button class="court-opt' + (n === 2 ? ' selected' : '') + '" data-action="pick-courts" data-n="' + n + '">' + n + '</button>';
+      }).join('') +
+      '</div></div>' +
+      '<div class="field"><label>Who is playing? <span class="muted" id="tsetup-count"></span></label>' +
+      '<div class="setup-actions"><button class="btn small" data-action="tsetup-all">Select all</button>' +
+      '<button class="btn small" data-action="tsetup-none">Select none</button></div>' +
+      '<div class="check-list divisions-list">' + groups + '</div>' +
+      '<p class="muted small-note">A division needs 4 players checked in to get a court. ' +
+      'To move someone to another division, change their level on the Players tab.</p></div>' +
+      '<div class="field"><label>Fixed partners <span class="muted">(optional)</span></label>' +
+      '<p class="muted small-note pairs-help">Partners go on together every game and count as one entry in ' +
+      'their division\'s line. Both must be in the same division.</p>' +
+      '<div id="tsetup-pairs"></div></div>' +
+      '<button class="btn primary big" data-action="start-tournament">Start tournament</button>' +
+      '</div>';
+  }
+
+  /* The selected count, and under each division how many are checked in,
+     flagged when there are some but fewer than the four a court needs. */
+  function updateTournamentCounts() {
+    var el = document.getElementById('tsetup-count');
+    if (!el) return;
+    var total = 0, per = {};
+    document.querySelectorAll('.tsetup-player').forEach(function (b) {
+      if (!b.checked) return;
+      total++;
+      var d = b.getAttribute('data-division');
+      per[d] = (per[d] || 0) + 1;
+    });
+    el.textContent = '(' + total + ' selected)';
+    document.querySelectorAll('.division-count').forEach(function (c) {
+      var n = per[c.getAttribute('data-division')] || 0;
+      c.textContent = n === 0 ? '' : n >= 4 ? '\u00b7 ' + n + ' playing' : '\u00b7 ' + n + ' playing, needs 4';
+      c.classList.toggle('warn', n > 0 && n < 4);
+    });
+  }
+
+  function renderTournamentPairs() {
+    var el = document.getElementById('tsetup-pairs');
+    if (!el) return;
+    var ids = checkedTournamentIds();
+    tourPairs = tourPairs.filter(function (p) { return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0; });
+    var byId = playersById();
+    el.innerHTML = pairsBlockHtml(tourPairs, ids, byId, divisionLabelFn(byId));
+  }
+
+  /* Why a tournament court is free: who is waiting, by division. */
+  function tournamentFreeReason(lines) {
+    var parts = [];
+    divisionNames().forEach(function (n) {
+      var ready = (lines[n] || []).filter(function (u) { return !u.waitingFor; });
+      var count = ready.reduce(function (s, u) { return s + u.ids.length; }, 0);
+      if (count) parts.push(Engine.divisionLabel(n) + ' ' + count);
+    });
+    if (!parts.length) return 'no one is waiting.';
+    return 'waiting: ' + parts.join(', ') + '. A division needs 4 ready to fill a court.';
+  }
+
+  function renderActiveTournament(session) {
+    var byId = playersById();
+    var actives = Engine.activeGames(session);
+    var finished = (session.games || []).filter(function (g) { return g.done; });
+    var counts = Engine.sessionCounts(session);
+    var fixed = Engine.fixedPairs(session);
+    var pairCount = (session.pairs || []).length;
+
+    // The line as units, one line per division. A pair whose levels were
+    // edited into different divisions cannot be seated and is listed apart.
+    var lines = {}, mixed = [];
+    Engine.queueUnits(session, byId).forEach(function (u) {
+      var cat = Engine.unitCategory(u, byId);
+      if (cat === null) { mixed.push(u); return; }
+      (lines[cat] = lines[cat] || []).push(u);
+    });
+    var onCourt = {};
+    actives.forEach(function (g) {
+      var cat = gameDivision(g, byId);
+      onCourt[cat] = (onCourt[cat] || 0) + 4;
+    });
+    var divisions = divisionNames().filter(function (n) {
+      return (lines[n] && lines[n].length) || onCourt[n] ||
+        session.playerIds.some(function (id) { return divisionOf(byId, id) === n; });
+    });
+    var chip = function (u, band, label) { return waitChip(u, band, label, byId, counts, true); };
+
+    var html = '<div class="session-bar">' +
+      '<div><strong>Tournament</strong> &middot; ' + fmtDate(session.startedAt) +
+      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
+      '<div class="session-bar-actions">' +
+      '<button class="btn small" data-action="manage-players">Players</button>' +
+      '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
+      '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
+      '</div></div>';
+
+    html += '<div class="division-strip">' + divisions.map(function (n) {
+      var ready = (lines[n] || []).filter(function (u) { return !u.waitingFor; });
+      var waiting = ready.reduce(function (s, u) { return s + u.ids.length; }, 0);
+      return '<span class="division-pill">' + esc(Engine.divisionLabel(n)) +
+        ' <span class="muted">' + (onCourt[n] || 0) + ' on court &middot; ' + waiting + ' waiting</span></span>';
+    }).join('') + '</div>';
+
+    html += '<div class="courts-grid">';
+    for (var c = 1; c <= session.courtCount; c++) {
+      var g = null;
+      actives.forEach(function (a) { if (a.court === c) g = a; });
+      html += g
+        ? renderActiveGameCard(g, byId, fixed, true, Engine.divisionLabel(gameDivision(g, byId)))
+        : renderFreeCourtCard(c, 0, 0, tournamentFreeReason(lines));
+    }
+    html += '</div>';
+
+    divisions.forEach(function (n) {
+      var all = lines[n] || [];
+      var ready = all.filter(function (u) { return !u.waitingFor; });
+      var held = all.filter(function (u) { return u.waitingFor; });
+      var readyCount = ready.reduce(function (s, u) { return s + u.ids.length; }, 0);
+      var bands = Engine.waitBands(ready);
+      var stuck = readyCount > 0 && readyCount < 4 && !onCourt[n];
+      html += '<div class="sitouts division-line">' +
+        '<div class="division-line-head"><span class="sitout-label">' + esc(Engine.divisionLabel(n)) + '</span>' +
+        (n ? ' <span class="muted">' + divisionRange(n) + '</span>' : '') +
+        ' <span class="muted">&middot; ' + readyCount + ' waiting' +
+        (stuck ? ', needs 4 for a court' : '') + '</span></div>' +
+        (ready.length
+          ? ready.map(function (u, i) { return chip(u, bands[i], (i + 1) + '.'); }).join(' ')
+          : '<span class="muted">No one waiting.</span>') +
+        (held.length
+          ? '<div class="held-line"><span class="sitout-label">Held for a partner:</span> ' +
+            held.map(function (u) { return chip(u, 'held', ''); }).join(' ') + '</div>'
+          : '') +
+        '</div>';
+    });
+    if (mixed.length) {
+      html += '<div class="sitouts division-line"><span class="sitout-label">Cannot be seated:</span> ' +
+        mixed.map(function (u) { return chip(u, 'held', ''); }).join(' ') +
+        '<div class="muted small-note">These partners are now in different divisions. ' +
+        'Split the pair (Partners) or change a level (Players tab).</div></div>';
+    }
+    html += '<div class="muted small-note tour-legend">' +
+      '<span class="legend legend-red">Red</span> waited longest in their division &middot; ' +
+      '<span class="legend legend-yellow">Yellow</span> next &middot; ' +
+      '<span class="legend legend-green">Green</span> most recent to sit down or arrive. ' +
+      'Time = how long they have been waiting; brackets = games played. ' +
+      'Divisions never mix: a free court goes to the division of whoever has waited longest, once 4 of them are ready.' +
+      (pairCount ? ' Fixed partners are one entry and go on together.' : '') +
+      '</div>';
+
+    if (finished.length) {
+      html += '<details class="round-past" open><summary>Finished games (' + finished.length + ')</summary>' +
+        '<div class="finished-list">' +
+        finished.slice().reverse().map(function (m) {
+          return renderFinishedGameRow(m, byId, Engine.divisionLabel(gameDivision(m, byId)));
+        }).join('') +
+        '</div></details>';
+    }
+
+    var stats = Engine.computeStats([session]);
+    Engine.tournamentDivisions(session, byId).forEach(function (d) {
+      var board = leaderboardHtml(stats, byId, d.ids);
+      if (board) html += '<div class="card"><h3>' + esc(d.label) + ' standings</h3>' + board + '</div>';
+    });
     return html;
   }
 
@@ -509,7 +806,8 @@
       return '<div class="player-row" data-action="session-detail" data-session="' + s.id + '">' +
         '<div class="player-main"><strong>' + fmtDate(s.startedAt) + '</strong>' +
         '<span class="muted">' + Engine.sessionParticipants(s).length + ' players &middot; ' +
-        countDoneGames(s) + ' games' + (s.status === 'active' ? ' &middot; in progress' : '') + '</span></div>' +
+        countDoneGames(s) + ' games' + (s.tournament ? ' &middot; tournament' : '') +
+        (s.status === 'active' ? ' &middot; in progress' : '') + '</span></div>' +
         '<span class="chev">&rsaquo;</span></div>';
     }).join('');
 
@@ -614,14 +912,23 @@
     if (!sess) return;
     var byId = playersById();
     var stats = Engine.computeStats([sess]);
-    var board = leaderboardHtml(stats, byId, null);   // includes players who left early
+    var board;   // includes players who left early
+    if (sess.tournament) {
+      board = Engine.tournamentDivisions(sess, byId).map(function (d) {
+        var b = leaderboardHtml(stats, byId, d.ids);
+        return b ? '<h3>' + esc(d.label) + '</h3>' + b : '';
+      }).join('');
+    } else {
+      board = leaderboardHtml(stats, byId, null);
+    }
     var partners = pairsLine(sess, byId);
     openModal(
-      '<h2>' + fmtDate(sess.startedAt) + '</h2>' +
+      '<h2>' + (sess.tournament ? 'Tournament &middot; ' : '') + fmtDate(sess.startedAt) + '</h2>' +
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
       (sess.matchBySkill ? '<p class="muted small-note">Courts were matched by skill level.</p>' : '') +
+      (sess.tournament ? '<p class="muted small-note">Every game was played within one division.</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
     );
@@ -664,9 +971,11 @@
         '<span class="muted">' + skillText(p.skill) + '</span></label>';
     }).join('');
     openModal(
-      '<h2>Session players</h2>' +
+      '<h2>' + (session.tournament ? 'Tournament players' : 'Session players') + '</h2>' +
       '<p class="muted small-note">Check people in or out. Anyone mid-game finishes that game; ' +
-      'checked-out players just get no new games. Checking out one half of a fixed pair splits the pair.</p>' +
+      'checked-out players just get no new games. Checking out one half of a fixed pair splits the pair.' +
+      (session.tournament ? ' Everyone plays in the division of their level; a division needs 4 checked in to get a court.' : '') +
+      '</p>' +
       '<div class="check-list">' + checks + '</div>' +
       '<div class="modal-actions">' +
       '<button class="btn" data-action="close-modal">Cancel</button>' +
@@ -680,14 +989,21 @@
       '<h2>Fixed partners</h2>' +
       '<p class="muted small-note">Partners play every game together and wait as one entry in the line. ' +
       'Changes apply from their next game; anyone mid-game finishes it first.</p>' +
-      '<div id="session-pairs">' + pairsBlockHtml(session.pairs || [], session.playerIds, playersById()) + '</div>' +
+      (session.tournament ? '<p class="muted small-note">Both partners must be in the same division.</p>' : '') +
+      '<div id="session-pairs">' + sessionPairsHtml(session) + '</div>' +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Done</button></div>'
     );
   }
 
+  function sessionPairsHtml(session) {
+    var byId = playersById();
+    return pairsBlockHtml(session.pairs || [], session.playerIds, byId,
+      session.tournament ? divisionLabelFn(byId) : null);
+  }
+
   function refreshPartners(session) {
     var el = document.getElementById('session-pairs');
-    if (el) el.innerHTML = pairsBlockHtml(session.pairs || [], session.playerIds, playersById());
+    if (el) el.innerHTML = sessionPairsHtml(session);
   }
 
   function showEditMatchup(matchId) {
@@ -700,6 +1016,13 @@
     // Anyone on this court plus anyone waiting; players on other courts stay put
     var eligible = m.teamA.concat(m.teamB, Engine.waitingPool(session))
       .filter(function (id) { return byId[id]; });
+    // In a tournament only the court's own division is offered.
+    var division = session.tournament ? gameDivision(m, byId) : null;
+    if (division !== null) {
+      eligible = eligible.filter(function (id) {
+        return m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0 || divisionOf(byId, id) === division;
+      });
+    }
     var pairNames = [], noted = {};
     eligible.forEach(function (id) {
       var p = fixed[id];
@@ -719,7 +1042,9 @@
     openModal(
       '<h2>Edit matchup</h2>' +
       '<p class="muted small-note">Court ' + m.court + '. Pick from the four on court or anyone waiting; ' +
-      'whoever you swap out goes back to the waiting list.</p>' +
+      'whoever you swap out goes back to the waiting list.' +
+      (division !== null ? ' This is a ' + esc(Engine.divisionLabel(division)) + ' game, so only ' +
+        esc(Engine.divisionLabel(division)) + ' players are offered.' : '') + '</p>' +
       (pairNames.length
         ? '<p class="muted small-note">Fixed partners: ' + pairNames.join(', ') +
           '. Splitting them here applies to this game only.</p>'
@@ -745,6 +1070,15 @@
     var uniq = {};
     ids.forEach(function (id) { uniq[id] = true; });
     if (Object.keys(uniq).length !== 4) { toast('Pick 4 different players.'); return; }
+    if (session.tournament) {
+      var byId = playersById();
+      var division = gameDivision(m, byId);
+      var outside = ids.filter(function (id) { return divisionOf(byId, id) !== division; });
+      if (outside.length) {
+        toast('All four must be ' + Engine.divisionLabel(division) + ' players: this is a tournament game.');
+        return;
+      }
+    }
     m.teamA = [ids[0], ids[1]];
     m.teamB = [ids[2], ids[3]];
     persist();
@@ -803,7 +1137,7 @@
 
   function startSession() {
     var courts = 2;
-    var sel = document.querySelector('.court-opt.selected');
+    var sel = document.querySelector('#view-play .court-opt.selected');
     if (sel) courts = parseInt(sel.getAttribute('data-n'), 10);
     var ids = Array.prototype.slice.call(document.querySelectorAll('.setup-player:checked'))
       .map(function (el) { return el.value; });
@@ -828,6 +1162,51 @@
     persist();
     renderPlay();
     toast('Session started — games are up on ' + started.length + ' court(s).');
+  }
+
+  function startTournament() {
+    var courts = 2;
+    var sel = document.querySelector('#view-tournament .court-opt.selected');
+    if (sel) courts = parseInt(sel.getAttribute('data-n'), 10);
+    var ids = checkedTournamentIds();
+    if (ids.length < 4) { toast('Pick at least 4 players.'); return; }
+    var byId = playersById();
+    var per = {};
+    ids.forEach(function (id) { var d = divisionOf(byId, id); per[d] = (per[d] || 0) + 1; });
+    var playable = Object.keys(per).filter(function (d) { return per[d] >= 4; });
+    if (!playable.length) { toast('No division has 4 players checked in, so no game can start.'); return; }
+    var short = divisionNames().filter(function (d) { return per[d] && per[d] < 4; });
+    if (short.length) {
+      var who = short.map(function (d) {
+        return Engine.divisionLabel(d) + ' has only ' + per[d] + (per[d] === 1 ? ' player' : ' players');
+      }).join(', ');
+      if (!confirm(who + ' checked in. A division needs 4 to get a court, so they will not get a game ' +
+        'unless more arrive or a level is changed. Start anyway?')) return;
+    }
+    var session = {
+      id: Storage_.newId(),
+      startedAt: Date.now(),
+      endedAt: null,
+      courtCount: courts,
+      playerIds: ids,
+      playerMeta: {},
+      pairs: tourPairs.filter(function (p) {
+        return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0 && divisionOf(byId, p[0]) === divisionOf(byId, p[1]);
+      }),
+      matchBySkill: false,
+      tournament: true,
+      games: [],
+      nextSeq: 1,
+      status: 'active'
+    };
+    var started = Engine.fillCourts(session, byId);
+    if (!started.length) { toast('Could not build a game.'); return; }
+    DB.sessions.push(session);
+    tourPairs = [];
+    persist();
+    renderPlay();
+    setTab('tournament');
+    toast('Tournament started — games are up on ' + started.length + ' court(s).');
   }
 
   function findGame(session, matchId) {
@@ -930,20 +1309,32 @@
     toast(msg);
   }
 
-  function addPair() {
-    var picks = Array.prototype.slice.call(document.querySelectorAll('.pair-pick'))
+  /* `box` is the pairs block the button sits in: the session setup, the
+     tournament setup, or the in-session modal. Both setups are on the page
+     at once, so the pickers are read from the block, not the document. */
+  function addPair(box) {
+    var picks = Array.prototype.slice.call((box || document).querySelectorAll('.pair-pick'))
       .map(function (s) { return s.value; });
     var a = picks[0], b = picks[1];
     if (!a || !b) { toast('Pick two players.'); return; }
     if (a === b) { toast('Pick two different players.'); return; }
     var session = activeSession();
+    var byId = playersById();
     if (!session) {
-      setupPairs.push([a, b]);
-      renderSetupPairs();
+      if (box && box.id === 'tsetup-pairs') {
+        if (divisionOf(byId, a) !== divisionOf(byId, b)) {
+          toast('In a tournament, partners must be in the same division.');
+          return;
+        }
+        tourPairs.push([a, b]);
+        renderTournamentPairs();
+      } else {
+        setupPairs.push([a, b]);
+        renderSetupPairs();
+      }
       return;
     }
-    var byId = playersById();
-    var r = Engine.setPair(session, a, b);
+    var r = Engine.setPair(session, a, b, byId);
     if (!r.ok) { toast(r.error); return; }
     persist();
     refreshPartners(session);
@@ -951,11 +1342,16 @@
     toast(byId[a].name + ' & ' + byId[b].name + ' will play together from their next game.');
   }
 
-  function removePair(playerId) {
+  function removePair(playerId, box) {
     var session = activeSession();
     if (!session) {
-      setupPairs = setupPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
-      renderSetupPairs();
+      if (box && box.id === 'tsetup-pairs') {
+        tourPairs = tourPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
+        renderTournamentPairs();
+      } else {
+        setupPairs = setupPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
+        renderSetupPairs();
+      }
       return;
     }
     Engine.clearPair(session, playerId);
@@ -984,7 +1380,8 @@
     var session = activeSession();
     if (!session) return;
     var unscored = Engine.activeGames(session).length;
-    var msg = 'End this session?' + (unscored ? ' ' + unscored + ' game(s) in progress have no score and will not count.' : '');
+    var what = session.tournament ? 'tournament' : 'session';
+    var msg = 'End this ' + what + '?' + (unscored ? ' ' + unscored + ' game(s) in progress have no score and will not count.' : '');
     if (!confirm(msg)) return;
     session.games = (session.games || []).filter(function (g) { return g.done; });
     session.status = 'done';
@@ -993,20 +1390,24 @@
     renderPlay();
     renderStats();
     showSessionDetail(session.id);
-    toast('Session saved.');
+    toast(session.tournament ? 'Tournament saved.' : 'Session saved.');
   }
 
   function savePlayer(playerId) {
-    var p = playersById()[playerId];
+    var byId = playersById();
+    var p = byId[playerId];
     if (!p) return;
     var name = document.getElementById('edit-player-name').value.trim();
     var skill = document.getElementById('edit-player-skill').value;
     if (!name) { toast('Name cannot be empty.'); return; }
     p.name = name;
     var hadGames = (Engine.computeStats(DB.sessions)[playerId] || { games: 0 }).games > 0;
+    var moved = '';
     if (skill !== p.skill) {
+      var fromDivision = Engine.skillCategory(p.skill);
       p.skill = skill;
       if (!hadGames) p.rating = Engine.initialRating(skill);
+      moved = tournamentLevelChange(playerId, fromDivision, byId);
     }
     var prevPhoto = p.photo, newPhoto = pendingPhoto;
     pendingPhoto = undefined;
@@ -1025,7 +1426,25 @@
     }
     closeModal();
     renderAll();
-    toast('Saved.');
+    toast('Saved.' + moved);
+  }
+
+  /* A level edited during a tournament can move a player to another
+     division. Their line changes from now; a game in progress finishes as
+     it is. A fixed pair that would now straddle two divisions is split. */
+  function tournamentLevelChange(playerId, fromDivision, byId) {
+    var session = activeSession();
+    if (!session || !session.tournament || session.playerIds.indexOf(playerId) < 0) return '';
+    var toDivision = divisionOf(byId, playerId);
+    if (toDivision === fromDivision) return '';
+    var note = ' ' + byId[playerId].name + ' now plays in the ' + Engine.divisionLabel(toDivision) + ' division.';
+    var partner = Engine.fixedPairs(session)[playerId];
+    if (partner && divisionOf(byId, partner) !== toDivision) {
+      Engine.clearPair(session, playerId);
+      note += ' Their fixed pair was split: partners must be in the same division.';
+    }
+    if (Engine.fillCourts(session, byId).length) note += ' A free court just filled.';
+    return note;
   }
 
   /* The photo chosen in the edit modal, held until Save: undefined leaves
@@ -1069,7 +1488,9 @@
     if (!p) return;
     var session = activeSession();
     if (session && session.playerIds.indexOf(playerId) >= 0) {
-      toast('Remove them from the running session first (Play tab → Players).');
+      toast(session.tournament
+        ? 'Remove them from the running tournament first (Tournament tab → Players).'
+        : 'Remove them from the running session first (Play tab → Players).');
       return;
     }
     if (!confirm('Archive ' + p.name + '? Their stats and history are kept.')) return;
@@ -1083,7 +1504,7 @@
      visible step, and the Play tab should never change under someone's
      hands. Each asks once, with the numbers it is about to delete. */
   function resetProgress() {
-    if (activeSession()) { toast('End the running session first (Play tab).'); return; }
+    if (activeSession()) { toast(endFirstMessage()); return; }
     var n = DB.sessions.length;
     if (!confirm('Delete all ' + n + ' session(s) and put every player back to their starting rating, ' +
       'with no history? Names and skill levels are kept. This cannot be undone.')) return;
@@ -1095,7 +1516,7 @@
   }
 
   function resetEverything() {
-    if (activeSession()) { toast('End the running session first (Play tab).'); return; }
+    if (activeSession()) { toast(endFirstMessage()); return; }
     if (!confirm('Erase everything: ' + DB.players.length + ' player(s) and ' + DB.sessions.length +
       ' session(s)? This cannot be undone. Export a backup first if you might want it back.')) return;
     DB = Storage_.defaultData();
@@ -1152,10 +1573,22 @@
     var action = t.getAttribute('data-action');
     switch (action) {
       case 'goto-players': setTab('players'); break;
-      case 'pick-courts':
-        document.querySelectorAll('.court-opt').forEach(function (b) { b.classList.remove('selected'); });
+      case 'goto-play': setTab('play'); break;
+      case 'goto-tournament': setTab('tournament'); break;
+      case 'pick-courts': {
+        // Each setup screen has its own picker; only this one changes.
+        var picker = t.closest('.court-picker') || document;
+        picker.querySelectorAll('.court-opt').forEach(function (b) { b.classList.remove('selected'); });
         t.classList.add('selected');
         break;
+      }
+      case 'tsetup-all':
+      case 'tsetup-none':
+        document.querySelectorAll('.tsetup-player').forEach(function (c) { c.checked = action === 'tsetup-all'; });
+        updateTournamentCounts();
+        renderTournamentPairs();
+        break;
+      case 'start-tournament': startTournament(); break;
       case 'setup-all':
       case 'setup-none':
         document.querySelectorAll('.setup-player').forEach(function (c) { c.checked = action === 'setup-all'; });
@@ -1182,8 +1615,10 @@
       case 'manage-players': { var s = activeSession(); if (s) showManagePlayers(s); break; }
       case 'apply-manage-players': applyManagePlayers(); break;
       case 'manage-partners': { var ps = activeSession(); if (ps) showPartners(ps); break; }
-      case 'add-pair': addPair(); break;
-      case 'remove-pair': removePair(t.getAttribute('data-player')); break;
+      case 'add-pair': addPair(t.closest('#setup-pairs, #session-pairs, #tsetup-pairs')); break;
+      case 'remove-pair':
+        removePair(t.getAttribute('data-player'), t.closest('#setup-pairs, #session-pairs, #tsetup-pairs'));
+        break;
       case 'toggle-skill-match': toggleSkillMatch(); break;
       case 'end-session': endSession(); break;
       case 'add-player': addPlayer(); break;
@@ -1212,6 +1647,10 @@
     if (e.target.classList && e.target.classList.contains('setup-player')) {
       updateSetupCount();
       renderSetupPairs();
+    }
+    if (e.target.classList && e.target.classList.contains('tsetup-player')) {
+      updateTournamentCounts();
+      renderTournamentPairs();
     }
     if (e.target.id === 'edit-player-photo') photoChosen(e.target);
   });

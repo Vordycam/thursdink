@@ -177,7 +177,8 @@
         Engine.sessionMatches(sess).forEach(function (m) { if (m.done) games++; });
         doc.ensure(70);
         // Count and list everyone who played, including anyone who left early.
-        doc.text(MARGIN, fmtDate(sess.startedAt) + '  -  ' + Engine.sessionParticipants(sess).length + ' players, ' +
+        doc.text(MARGIN, (sess.tournament ? 'Tournament - ' : '') + fmtDate(sess.startedAt) + '  -  ' +
+          Engine.sessionParticipants(sess).length + ' players, ' +
           games + ' games' + (sess.status === 'active' ? ' (in progress)' : ''), 12, true);
         if ((sess.pairs || []).length) {
           doc.text(MARGIN, 'Fixed partners: ' + sess.pairs.map(function (p) {
@@ -185,8 +186,22 @@
           }).join(', '), 8, false);
         }
         if (sess.matchBySkill) doc.text(MARGIN, 'Courts were matched by skill level.', 8, false);
-        doc.space(2);
-        writeStandings(doc, Engine.rankStandings(Engine.computeStats([sess]), byId, null));
+        var sessStats = Engine.computeStats([sess]);
+        if (sess.tournament) {
+          // One table per division: nobody played outside their own.
+          doc.text(MARGIN, 'Every game was played within one division.', 8, false);
+          Engine.tournamentDivisions(sess, byId).forEach(function (d) {
+            var board = Engine.rankStandings(sessStats, byId, d.ids);
+            if (!board.ranked.length && !board.mentions.length) return;
+            doc.ensure(60);
+            doc.space(4);
+            doc.text(MARGIN, d.label, 11, true);
+            writeStandings(doc, board);
+          });
+        } else {
+          doc.space(2);
+          writeStandings(doc, Engine.rankStandings(sessStats, byId, null));
+        }
         doc.space(8);
       });
     }

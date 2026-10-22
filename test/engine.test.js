@@ -867,3 +867,189 @@ test('playerProgression walks the rating back through each session, oldest first
   assert.deepEqual(Engine.playerProgression(p, [legacy]).rows.map((r) => [r.ratingAfter, r.ratingChange]), [[1290, 0]]);
   assert.deepEqual(Engine.playerProgression({ id: 'Z', rating: 1100 }, [s1, s2, s3]), { rows: [], start: 1100 });
 });
+
+/* ── tournament ───────────────────────────────────────────────────────── */
+
+function categoriesOf(game, byId) {
+  return onCourt(game).map((id) => Engine.skillCategory(byId[id].skill));
+}
+
+test('tournament is off unless the session turns it on', () => {
+  const sess = session(['A', 'B', 'C', 'D']);
+  assert.equal(Engine.tournament(sess), false, 'sessions saved before this option have no flag');
+  sess.tournament = true;
+  assert.equal(Engine.tournament(sess), true);
+  assert.equal(Engine.divisionLabel('Novice'), 'Novice');
+  assert.equal(Engine.divisionLabel(''), 'Unrated', 'a level off the scale forms a division of its own');
+});
+
+test('tournament: every game is within one division, over a long night of mixed levels', () => {
+  // 4 Beginners, 5 Novices, 4 Intermediates on two courts with random game
+  // lengths. No court ever mixes divisions, every game is tagged with its
+  // division, and everyone gets a fair share of games.
+  const table = {
+    A: '1.5', B: '2.0', C: '2.5', D: '2.5',
+    E: '3.0', F: '3.0', G: '3.5', H: '3.5', I: '3.5',
+    J: '4.0', K: '4.0', L: '4.5', M: '4.5',
+  };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  assert.equal(Engine.fillCourts(sess, byId).length, 2, 'both courts fill');
+  for (let round = 0; round < 40; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(2 * MIN + Math.floor(Math.random() * 6 * MIN));
+    Engine.completeGame(g, 11, Math.floor(Math.random() * 11));
+    Engine.fillCourts(sess, byId);
+  }
+  assert.ok(sess.games.length >= 40);
+  sess.games.forEach((g) => {
+    const cats = categoriesOf(g, byId);
+    assert.ok(cats.every((c) => c === cats[0]), `mixed court: ${g.teamA} v ${g.teamB} (${cats})`);
+    assert.equal(g.category, cats[0], 'the game records its division');
+  });
+  const counts = Engine.sessionCounts(sess).games;
+  Object.keys(table).forEach((id) => assert.ok(counts[id] >= 6, `${id} played only ${counts[id]} games`));
+});
+
+test('tournament: a division with three players never gets a court, and never borrows a fourth', () => {
+  const table = { A: '5.0', B: '5.0', C: '5.5', D: '3.0', E: '3.0', F: '3.5', G: '3.5', H: '3.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1, 'only the Novices can fill a court');
+  assert.deepEqual(categoriesOf(started[0], byId), ['Novice', 'Novice', 'Novice', 'Novice']);
+  const pool = Engine.waitingPool(sess);
+  assert.deepEqual(pool.filter((id) => 'ABC'.includes(id)).sort(), ['A', 'B', 'C'], 'the three Experts wait');
+  assert.equal(pool.length, 4, 'with the fifth Novice - whichever one the tie-break left out');
+  advance(30 * MIN);
+  Engine.completeGame(started[0], 11, 3);
+  const next = Engine.fillCourts(sess, byId);
+  assert.equal(next.length, 1);
+  assert.deepEqual(categoriesOf(next[0], byId), ['Novice', 'Novice', 'Novice', 'Novice'],
+    'half an hour on, the Experts still cannot play: nobody is pulled in to make four');
+});
+
+test('tournament: the court goes to the division of the longest wait, if four of them are ready', () => {
+  const table = { A: '2.0', B: '2.0', C: '2.5', D: '2.5', E: '4.0', F: '4.0', G: '4.5', H: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 1);
+  sess.tournament = true;
+  played(sess, ['A', 'B'], ['C', 'D']);            // Beginners free at t0
+  advance(10 * MIN);
+  played(sess, ['E', 'F'], ['G', 'H']);            // Intermediates free ten minutes later
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(onCourt(g).sort(), ['A', 'B', 'C', 'D'], 'the Beginners waited longer');
+  assert.equal(g.category, 'Beginner');
+});
+
+test('tournament: a long wait in a division that cannot fill a court does not block the others', () => {
+  // Two Experts have waited twenty minutes; four Novices just sat down. The
+  // Experts cannot play (needs 4), so the court goes to the Novices.
+  const table = { P: '5.0', Q: '5.5', A: '3.0', B: '3.0', C: '3.5', D: '3.5', X: '5.0', Y: '5.0' };
+  const byId = levelled(table);
+  const sess = session(['P', 'Q', 'A', 'B', 'C', 'D'], 1);
+  sess.tournament = true;
+  played(sess, ['P', 'X'], ['Q', 'Y']);
+  advance(20 * MIN);
+  played(sess, ['A', 'B'], ['C', 'D']);
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(onCourt(g).sort(), ['A', 'B', 'C', 'D']);
+  assert.equal(g.category, 'Novice');
+});
+
+test('tournament: within a division the usual order holds - longest wait first, fewest games on ties', () => {
+  const table = { A: '3.0', B: '3.5', C: '3.0', D: '3.0', E: '3.5', F: '3.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 1);
+  sess.tournament = true;
+  played(sess, ['A', 'B'], ['C', 'D']);            // all four free at t0
+  played(sess, ['C', 'D'], ['E', 'F']);            // C, D on two games
+  advance(10 * MIN);
+  played(sess, ['C', 'E'], ['D', 'F']);            // C, D, E, F free now; C, D on three
+  const four = onCourt(Engine.fillCourts(sess, byId)[0]);
+  assert.ok(four.includes('A') && four.includes('B'), `A and B waited longest: ${four}`);
+  assert.ok(four.includes('E') && four.includes('F'), `E and F have fewer games than C and D: ${four}`);
+});
+
+test('tournament: fixed pairs stay together, must share a division, and a straddling pair is never seated', () => {
+  const table = { A: '3.0', B: '3.5', C: '3.0', D: '3.0', E: '3.5', F: '3.5', G: '4.0', H: '4.0', I: '4.5', J: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  sess.pairs = [];
+  assert.equal(Engine.setPair(sess, 'A', 'B', byId).ok, true, 'two Novices can pair');
+  const cross = Engine.setPair(sess, 'C', 'G', byId);
+  assert.equal(cross.ok, false, 'a Novice and an Intermediate cannot');
+  assert.match(cross.error, /same division/);
+  assert.equal(Engine.setPair(sess, 'C', 'G').ok, true, 'without the players the engine cannot tell - as before');
+  Engine.clearPair(sess, 'C');
+  const plain = session(['C', 'G', 'H', 'I']);
+  assert.equal(Engine.setPair(plain, 'C', 'G', byId).ok, true, 'outside a tournament any two can pair');
+
+  Engine.fillCourts(sess, byId);
+  for (let round = 0; round < 20; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(3 * MIN);
+    Engine.completeGame(g, 11, 5);
+    Engine.fillCourts(sess, byId);
+    Engine.activeGames(sess).forEach((game) => {
+      const cats = categoriesOf(game, byId);
+      assert.ok(cats.every((c) => c === cats[0]), `mixed court: ${game.teamA} v ${game.teamB}`);
+      if (onCourt(game).includes('A') || onCourt(game).includes('B')) assert.ok(sameTeam(game, 'A', 'B'));
+    });
+  }
+
+  // B's level is edited up to Intermediate while still paired with A. The
+  // pair now straddles two divisions: it is reported, and never seated.
+  Engine.activeGames(sess).forEach((g) => Engine.completeGame(g, 11, 2));
+  byId.B.skill = '4.0';
+  const unit = Engine.queueUnits(sess, byId).find((u) => u.ids.includes('A'));
+  assert.deepEqual(unit.ids.slice().sort(), ['A', 'B']);
+  assert.equal(Engine.unitCategory(unit, byId), null);
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 2, 'the other eight still fill both courts');
+  started.forEach((g) => assert.ok(!onCourt(g).includes('A') && !onCourt(g).includes('B'), 'the straddling pair sits'));
+});
+
+test('tournament: games carry their division, so a level edited later does not move results', () => {
+  const table = { A: '3.0', B: '3.0', C: '3.5', D: '3.5', E: '4.0', F: '4.0', G: '4.5', H: '4.5', N: '2.0' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 2);
+  started.forEach((g) => Engine.completeGame(g, 11, 6));
+  let divs = Engine.tournamentDivisions(sess, byId);
+  assert.deepEqual(divs.map((d) => d.label), ['Beginner', 'Novice', 'Intermediate']);
+  assert.deepEqual(divs.find((d) => d.name === 'Beginner').ids, ['N'], 'N has not played: current level');
+  assert.deepEqual(divs.find((d) => d.name === 'Novice').ids.sort(), ['A', 'B', 'C', 'D']);
+  assert.deepEqual(divs.find((d) => d.name === 'Intermediate').ids.sort(), ['E', 'F', 'G', 'H']);
+
+  byId.A.skill = '5.0';                            // edited after the night
+  divs = Engine.tournamentDivisions(sess, byId);
+  assert.ok(divs.find((d) => d.name === 'Novice').ids.includes('A'), 'A played as a Novice and stays there');
+  assert.ok(!divs.find((d) => d.name === 'Expert'));
+
+  const plain = session(['A', 'B', 'C', 'D']);
+  Engine.fillCourts(plain, byId);
+  assert.equal(plain.games[0].category, undefined, 'a regular game is not tagged');
+});
+
+test('tournament: a late joiner goes to the back of the line in their own division', () => {
+  const table = { A: '3.0', B: '3.0', C: '3.5', D: '3.5', E: '3.5', F: '3.0', G: '3.0' };
+  const byId = levelled(table);
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  sess.tournament = true;
+  played(sess, ['A', 'B'], ['C', 'D']);
+  advance(5 * MIN);
+  Engine.setSessionPlayers(sess, ['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+  const g = Engine.fillCourts(sess, byId)[0];
+  const four = onCourt(g);
+  assert.ok(!four.includes('F') && !four.includes('G'), `the newcomers wait behind the five who were here: ${four}`);
+  assert.ok(four.includes('E'), 'E has waited since the start with no games');
+  assert.equal(g.category, 'Novice');
+});

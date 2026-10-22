@@ -6,7 +6,8 @@
    may opt to be fixed partners for the night: they are then one unit in the
    line and always land on the same team. A session may also match by skill:
    courts are then built around the longest wait from the players closest to
-   them in rating. */
+   them in rating. A tournament goes further: every game is played within
+   one division, the group's skill categories, and divisions never mix. */
 (function () {
   'use strict';
 
@@ -82,6 +83,46 @@
 
   function matchBySkill(session) {
     return !!session.matchBySkill;
+  }
+
+  /*
+   * Tournament mode is a per-session option for the nights the group runs
+   * a tournament. Every game is then played within one division - the
+   * group's skill categories, by declared level - so a Beginner only ever
+   * shares a court with Beginners, a Novice with Novices, and so on. Any
+   * court can host any division; which one is decided game by game. Within
+   * a division the usual rules apply: longest wait first, then fewest
+   * games, with the same variety and balance in team-making.
+   *
+   * Between divisions, a free court goes to the division of whoever has
+   * waited longest, provided four of them are ready. A division with fewer
+   * than four ready cannot fill a court and is passed over for the next
+   * longest wait in another division - never topped up from one.
+   */
+  function tournament(session) {
+    return !!session.tournament;
+  }
+
+  /* The division a player plays in: the category of their declared level.
+     '' for a level off the scale; such players form a division of their own. */
+  function playerCategory(playersById, id) {
+    var p = playersById[id];
+    return p ? skillCategory(p.skill) : '';
+  }
+
+  /* The name a division is shown under. */
+  function divisionLabel(category) {
+    return category || 'Unrated';
+  }
+
+  /* A unit's division, or null when its members are in different ones - a
+     fixed pair whose levels were edited apart. Such a unit is never seated. */
+  function unitCategory(unit, playersById) {
+    var cat = playerCategory(playersById, unit.ids[0]);
+    for (var i = 1; i < unit.ids.length; i++) {
+      if (playerCategory(playersById, unit.ids[i]) !== cat) return null;
+    }
+    return cat;
   }
 
   function initialRating(skill) {
@@ -172,11 +213,15 @@
   }
 
   /* Make two checked-in players a pair. Anyone can be in only one pair, so
-     an earlier pair involving either of them is replaced. */
-  function setPair(session, a, b) {
+     an earlier pair involving either of them is replaced. In a tournament,
+     given the players, both must be in the same division. */
+  function setPair(session, a, b, playersById) {
     if (!a || !b || a === b) return { ok: false, error: 'Pick two different players.' };
     if (session.playerIds.indexOf(a) < 0 || session.playerIds.indexOf(b) < 0) {
       return { ok: false, error: 'Both players must be checked in to this session.' };
+    }
+    if (tournament(session) && playersById && playerCategory(playersById, a) !== playerCategory(playersById, b)) {
+      return { ok: false, error: 'In a tournament, partners must be in the same division.' };
     }
     clearPair(session, a);
     clearPair(session, b);
@@ -491,6 +536,10 @@
    * unit that has waited longest (fewest games within the tie window) always
    * plays, and every other waiting unit is a candidate for the remaining
    * seats, weighed by rating fit against how much longer they have waited.
+   *
+   * A tournament runs the same pick, but over one division at a time: the
+   * division of the longest wait first, then the next, until one of them
+   * has four ready. The game is tagged with its division.
    */
   function nextGame(session, playersById) {
     var ranked = rankUnits(session, playersById, true);
@@ -504,6 +553,29 @@
       return (playersById[id] && playersById[id].rating) || 1250;
     }
 
+    if (!tournament(session)) return pickNext(units, counts, fixed, skill, ratingOf);
+
+    // The units are already in queue order, so the first seen from each
+    // division is that division's claim on the court.
+    var byCat = {}, order = [];
+    units.forEach(function (u) {
+      var cat = unitCategory(u, playersById);
+      if (cat === null) return;
+      if (!byCat[cat]) { byCat[cat] = []; order.push(cat); }
+      byCat[cat].push(u);
+    });
+    for (var d = 0; d < order.length; d++) {
+      var division = byCat[order[d]];
+      if (countIds(division) < 4) continue;
+      var game = pickNext(division, counts, fixed, skill, ratingOf);
+      if (game) { game.category = order[d]; return game; }
+    }
+    return null;
+  }
+
+  /* The pick itself, over units already in queue order with four or more
+     players among them. */
+  function pickNext(units, counts, fixed, skill, ratingOf) {
     var locked = [], tier = [];
     if (skill) {
       var head = units[0];
@@ -589,6 +661,9 @@
         finishedAt: null,
         ratingDeltas: null
       };
+      // A tournament game carries its division, so the record keeps it
+      // even if a level is edited later.
+      if (next.category !== undefined) game.category = next.category;
       session.games.push(game);
       started.push(game);
     }
@@ -772,6 +847,28 @@
   }
 
   /*
+   * A tournament's divisions in scale order, each with everyone who is or
+   * was part of it. A player's division is the one of the last game they
+   * played, so a level edited after the night does not move their results;
+   * until they have played it is their current level.
+   */
+  function tournamentDivisions(session, playersById) {
+    var of = {};
+    sessionParticipants(session).forEach(function (id) { of[id] = playerCategory(playersById, id); });
+    sessionMatches(session).forEach(function (m) {
+      if (!m.done || m.category === undefined) return;
+      m.teamA.concat(m.teamB).forEach(function (id) { of[id] = m.category; });
+    });
+    var names = SKILL_CATEGORIES.map(function (c) { return c.name; }).concat(['']);
+    var out = [];
+    names.forEach(function (name) {
+      var ids = Object.keys(of).filter(function (id) { return of[id] === name; });
+      if (ids.length) out.push({ name: name, label: divisionLabel(name), ids: ids });
+    });
+    return out;
+  }
+
+  /*
    * Standings. Two lists: the board, and special mentions.
    *
    * Ranking by win percentage let a 1-0 night sit above a 7-1 one. The
@@ -872,6 +969,11 @@
     playerProgression: playerProgression,
     resetProgress: resetProgress,
     matchBySkill: matchBySkill,
+    tournament: tournament,
+    playerCategory: playerCategory,
+    unitCategory: unitCategory,
+    divisionLabel: divisionLabel,
+    tournamentDivisions: tournamentDivisions,
     skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,

@@ -190,6 +190,10 @@
         if (sess.tournament) {
           // One table per division: nobody played outside their own.
           doc.text(MARGIN, 'Every game was played within one division.', 8, false);
+          // Its own line: the writer does not wrap, and together they would run off the page.
+          if (sess.mixedPairs) {
+            doc.text(MARGIN, 'Partners of different levels were allowed; such a pair played in the higher partner\'s division.', 8, false);
+          }
           Engine.tournamentDivisions(sess, byId).forEach(function (d) {
             var board = Engine.rankStandings(sessStats, byId, d.ids);
             if (!board.ranked.length && !board.mentions.length) return;

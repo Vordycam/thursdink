@@ -342,3 +342,9 @@ table.prog th:first-child, table.prog td:first-child { text-align: left; }
 }
 .division-line-head { margin-bottom: 6px; }
 .tour-legend { margin: 0 0 12px; }
+/* Mixed-level pairs: the setup note under its checkbox, where a pair of
+   different levels plays, and room for one more button in the live bar. */
+.mixed-note { margin: 0 0 8px; }
+.pair-note { font-size: .8rem; font-weight: 500; color: var(--muted); }
+.pair-note.warn { color: var(--danger); font-weight: 600; }
+.tour-actions { flex-wrap: wrap; }

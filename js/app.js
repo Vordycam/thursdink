@@ -248,7 +248,7 @@
      whoever is unpaired. Shared by session setup, tournament setup and the
      in-session modal. `labelOf` can add to a name in the picker (the
      tournament shows each player's division beside it). */
-  function pairsBlockHtml(pairs, ids, byId, labelOf) {
+  function pairsBlockHtml(pairs, ids, byId, labelOf, noteOf) {
     function name(id) { return byId[id] ? byId[id].name : '?'; }
     var label = labelOf || name;
     var paired = {};
@@ -258,7 +258,7 @@
 
     var rows = pairs.map(function (p) {
       return '<div class="pair-row"><span class="pair-names">' + esc(name(p[0])) + ' &amp; ' + esc(name(p[1])) +
-        ' <span class="pair-tag">pair</span></span>' +
+        ' <span class="pair-tag">pair</span>' + (noteOf ? noteOf(p) : '') + '</span>' +
         '<button class="btn small" data-action="remove-pair" data-player="' + p[0] + '">Split</button></div>';
     }).join('');
     if (!rows) rows = '<p class="muted small-note pairs-none">No fixed partners.</p>';
@@ -447,8 +447,46 @@
 
   /* ---------- Tournament view ---------- */
 
-  /* Pairs chosen on the tournament setup screen, applied when it starts. */
+  /* Pairs chosen on the tournament setup screen, applied when it starts,
+     and whether partners of different levels are allowed. Both live here,
+     not in the form, so a redraw of the setup screen keeps them. */
   var tourPairs = [];
+  var tourMixedPairs = false;
+
+  /* What the mixed-level pairs setting means, in its current state. */
+  function mixedPairsNote(on) {
+    return on
+      ? 'On: two players of different levels may pair up. The pair plays in the higher partner\'s ' +
+        'division, and the other two on that court are from that division as usual.'
+      : 'Off: both partners must be in the same division.';
+  }
+
+  /* For a tournament's pair rows: where a pair of different levels plays,
+     or a warning when it cannot be seated. Nothing for an ordinary pair. */
+  function pairNoteFn(byId, session) {
+    return function (p) {
+      if (divisionOf(byId, p[0]) === divisionOf(byId, p[1])) return '';
+      var cat = Engine.unitCategory({ ids: p }, byId, session);
+      return cat === null
+        ? ' <span class="pair-note warn">different divisions</span>'
+        : ' <span class="pair-note">plays in ' + esc(Engine.divisionLabel(cat)) + '</span>';
+    };
+  }
+
+  /* The division each checked-in player would play in at setup: their own,
+     or their pair's when partners of different levels are allowed - the
+     engine's rule, the higher of the two. */
+  function setupDivisions(ids, byId) {
+    var of = {};
+    ids.forEach(function (id) { of[id] = divisionOf(byId, id); });
+    if (tourMixedPairs) {
+      tourPairs.forEach(function (p) {
+        if (of[p[0]] === undefined || of[p[1]] === undefined) return;
+        of[p[0]] = of[p[1]] = Engine.unitCategory({ ids: p }, byId, { mixedPairs: true });
+      });
+    }
+    return of;
+  }
 
   function renderTournament() {
     var view = document.getElementById('view-tournament');
@@ -543,7 +581,10 @@
       'To move someone to another division, change their level on the Players tab.</p></div>' +
       '<div class="field"><label>Fixed partners <span class="muted">(optional)</span></label>' +
       '<p class="muted small-note pairs-help">Partners go on together every game and count as one entry in ' +
-      'their division\'s line. Both must be in the same division.</p>' +
+      'their division\'s line.</p>' +
+      '<label class="check-row"><input type="checkbox" id="tsetup-mixed-pairs"' + (tourMixedPairs ? ' checked' : '') + '> ' +
+      '<span class="check-name">Allow partners of different levels</span></label>' +
+      '<p class="muted small-note mixed-note">' + mixedPairsNote(tourMixedPairs) + '</p>' +
       '<div id="tsetup-pairs"></div></div>' +
       '<button class="btn primary big" data-action="start-tournament">Start tournament</button>' +
       '</div>';
@@ -554,13 +595,12 @@
   function updateTournamentCounts() {
     var el = document.getElementById('tsetup-count');
     if (!el) return;
-    var total = 0, per = {};
-    document.querySelectorAll('.tsetup-player').forEach(function (b) {
-      if (!b.checked) return;
-      total++;
-      var d = b.getAttribute('data-division');
-      per[d] = (per[d] || 0) + 1;
-    });
+    // Counted by the division each player would play in, so a partner of a
+    // different level who plays up is counted where they will actually play.
+    var ids = checkedTournamentIds();
+    var of = setupDivisions(ids, playersById());
+    var total = ids.length, per = {};
+    ids.forEach(function (id) { per[of[id]] = (per[of[id]] || 0) + 1; });
     el.textContent = '(' + total + ' selected)';
     document.querySelectorAll('.division-count').forEach(function (c) {
       var n = per[c.getAttribute('data-division')] || 0;
@@ -573,9 +613,13 @@
     var el = document.getElementById('tsetup-pairs');
     if (!el) return;
     var ids = checkedTournamentIds();
-    tourPairs = tourPairs.filter(function (p) { return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0; });
     var byId = playersById();
-    el.innerHTML = pairsBlockHtml(tourPairs, ids, byId, divisionLabelFn(byId));
+    tourPairs = tourPairs.filter(function (p) {
+      return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0 &&
+        (tourMixedPairs || divisionOf(byId, p[0]) === divisionOf(byId, p[1]));
+    });
+    el.innerHTML = pairsBlockHtml(tourPairs, ids, byId, divisionLabelFn(byId),
+      pairNoteFn(byId, tourMixedPairs ? { mixedPairs: true } : null));
   }
 
   /* Why a tournament court is free: who is waiting, by division. */
@@ -597,12 +641,14 @@
     var counts = Engine.sessionCounts(session);
     var fixed = Engine.fixedPairs(session);
     var pairCount = (session.pairs || []).length;
+    var mixedOn = Engine.mixedPairs(session);
 
-    // The line as units, one line per division. A pair whose levels were
-    // edited into different divisions cannot be seated and is listed apart.
+    // The line as units, one line per division. A pair of different levels
+    // is in the higher partner's line when the host allows it; otherwise it
+    // cannot be seated and is listed apart.
     var lines = {}, mixed = [];
     Engine.queueUnits(session, byId).forEach(function (u) {
-      var cat = Engine.unitCategory(u, byId);
+      var cat = Engine.unitCategory(u, byId, session);
       if (cat === null) { mixed.push(u); return; }
       (lines[cat] = lines[cat] || []).push(u);
     });
@@ -613,16 +659,18 @@
     });
     var divisions = divisionNames().filter(function (n) {
       return (lines[n] && lines[n].length) || onCourt[n] ||
-        session.playerIds.some(function (id) { return divisionOf(byId, id) === n; });
+        session.playerIds.some(function (id) { return Engine.playerDivision(session, byId, id) === n; });
     });
     var chip = function (u, band, label) { return waitChip(u, band, label, byId, counts, true); };
 
     var html = '<div class="session-bar">' +
       '<div><strong>Tournament</strong> &middot; ' + fmtDate(session.startedAt) +
       ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
-      '<div class="session-bar-actions">' +
+      '<div class="session-bar-actions tour-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
+      '<button class="btn small' + (mixedOn ? ' on' : '') + '" data-action="toggle-mixed-pairs">Mixed-level pairs: ' +
+      (mixedOn ? 'On' : 'Off') + '</button>' +
       '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
       '</div></div>';
 
@@ -677,6 +725,7 @@
       'Time = how long they have been waiting; brackets = games played. ' +
       'Divisions never mix: a free court goes to the division of whoever has waited longest, once 4 of them are ready.' +
       (pairCount ? ' Fixed partners are one entry and go on together.' : '') +
+      (mixedOn ? ' Mixed-level pairs are on: partners of different levels play as a pair in the higher partner\'s division.' : '') +
       '</div>';
 
     if (finished.length) {
@@ -928,7 +977,9 @@
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
       (sess.matchBySkill ? '<p class="muted small-note">Courts were matched by skill level.</p>' : '') +
-      (sess.tournament ? '<p class="muted small-note">Every game was played within one division.</p>' : '') +
+      (sess.tournament ? '<p class="muted small-note">Every game was played within one division.' +
+        (sess.mixedPairs ? ' Partners of different levels were allowed; such a pair played in the higher partner\'s division.' : '') +
+        '</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
     );
@@ -974,7 +1025,8 @@
       '<h2>' + (session.tournament ? 'Tournament players' : 'Session players') + '</h2>' +
       '<p class="muted small-note">Check people in or out. Anyone mid-game finishes that game; ' +
       'checked-out players just get no new games. Checking out one half of a fixed pair splits the pair.' +
-      (session.tournament ? ' Everyone plays in the division of their level; a division needs 4 checked in to get a court.' : '') +
+      (session.tournament ? ' Everyone plays in the division of their level' +
+        (Engine.mixedPairs(session) ? ', or of their pair' : '') + '; a division needs 4 checked in to get a court.' : '') +
       '</p>' +
       '<div class="check-list">' + checks + '</div>' +
       '<div class="modal-actions">' +
@@ -989,7 +1041,11 @@
       '<h2>Fixed partners</h2>' +
       '<p class="muted small-note">Partners play every game together and wait as one entry in the line. ' +
       'Changes apply from their next game; anyone mid-game finishes it first.</p>' +
-      (session.tournament ? '<p class="muted small-note">Both partners must be in the same division.</p>' : '') +
+      (session.tournament ? '<p class="muted small-note">' + (Engine.mixedPairs(session)
+        ? 'Partners of different levels are allowed; such a pair plays in the higher partner\'s division. ' +
+          'The Mixed-level pairs button on the Tournament tab turns this off.'
+        : 'Both partners must be in the same division. The Mixed-level pairs button on the Tournament tab allows ' +
+          'partners of different levels.') + '</p>' : '') +
       '<div id="session-pairs">' + sessionPairsHtml(session) + '</div>' +
       '<div class="modal-actions"><button class="btn" data-action="close-modal">Done</button></div>'
     );
@@ -998,7 +1054,8 @@
   function sessionPairsHtml(session) {
     var byId = playersById();
     return pairsBlockHtml(session.pairs || [], session.playerIds, byId,
-      session.tournament ? divisionLabelFn(byId) : null);
+      session.tournament ? divisionLabelFn(byId) : null,
+      session.tournament ? pairNoteFn(byId, session) : null);
   }
 
   function refreshPartners(session) {
@@ -1016,11 +1073,12 @@
     // Anyone on this court plus anyone waiting; players on other courts stay put
     var eligible = m.teamA.concat(m.teamB, Engine.waitingPool(session))
       .filter(function (id) { return byId[id]; });
-    // In a tournament only the court's own division is offered.
+    // In a tournament only the court's own division is offered - by the
+    // division each player plays in, so a partner playing up is included.
     var division = session.tournament ? gameDivision(m, byId) : null;
     if (division !== null) {
       eligible = eligible.filter(function (id) {
-        return m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0 || divisionOf(byId, id) === division;
+        return m.teamA.indexOf(id) >= 0 || m.teamB.indexOf(id) >= 0 || Engine.playerDivision(session, byId, id) === division;
       });
     }
     var pairNames = [], noted = {};
@@ -1071,9 +1129,14 @@
     ids.forEach(function (id) { uniq[id] = true; });
     if (Object.keys(uniq).length !== 4) { toast('Pick 4 different players.'); return; }
     if (session.tournament) {
+      // Nobody from another division may be brought in. The four already on
+      // the court were seated by the rules, so they can always stay.
       var byId = playersById();
       var division = gameDivision(m, byId);
-      var outside = ids.filter(function (id) { return divisionOf(byId, id) !== division; });
+      var already = m.teamA.concat(m.teamB);
+      var outside = ids.filter(function (id) {
+        return already.indexOf(id) < 0 && Engine.playerDivision(session, byId, id) !== division;
+      });
       if (outside.length) {
         toast('All four must be ' + Engine.divisionLabel(division) + ' players: this is a tournament game.');
         return;
@@ -1171,8 +1234,9 @@
     var ids = checkedTournamentIds();
     if (ids.length < 4) { toast('Pick at least 4 players.'); return; }
     var byId = playersById();
+    var of = setupDivisions(ids, byId);
     var per = {};
-    ids.forEach(function (id) { var d = divisionOf(byId, id); per[d] = (per[d] || 0) + 1; });
+    ids.forEach(function (id) { var d = of[id]; per[d] = (per[d] || 0) + 1; });
     var playable = Object.keys(per).filter(function (d) { return per[d] >= 4; });
     if (!playable.length) { toast('No division has 4 players checked in, so no game can start.'); return; }
     var short = divisionNames().filter(function (d) { return per[d] && per[d] < 4; });
@@ -1191,10 +1255,12 @@
       playerIds: ids,
       playerMeta: {},
       pairs: tourPairs.filter(function (p) {
-        return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0 && divisionOf(byId, p[0]) === divisionOf(byId, p[1]);
+        return ids.indexOf(p[0]) >= 0 && ids.indexOf(p[1]) >= 0 &&
+          (tourMixedPairs || divisionOf(byId, p[0]) === divisionOf(byId, p[1]));
       }),
       matchBySkill: false,
       tournament: true,
+      mixedPairs: tourMixedPairs,
       games: [],
       nextSeq: 1,
       status: 'active'
@@ -1203,6 +1269,7 @@
     if (!started.length) { toast('Could not build a game.'); return; }
     DB.sessions.push(session);
     tourPairs = [];
+    tourMixedPairs = false;
     persist();
     renderPlay();
     setTab('tournament');
@@ -1322,12 +1389,14 @@
     var byId = playersById();
     if (!session) {
       if (box && box.id === 'tsetup-pairs') {
-        if (divisionOf(byId, a) !== divisionOf(byId, b)) {
-          toast('In a tournament, partners must be in the same division.');
+        if (!tourMixedPairs && divisionOf(byId, a) !== divisionOf(byId, b)) {
+          toast('In a tournament, partners must be in the same division. ' +
+            'Tick "Allow partners of different levels" to allow this pair.');
           return;
         }
         tourPairs.push([a, b]);
         renderTournamentPairs();
+        updateTournamentCounts();   // a partner playing up is counted where they will play
       } else {
         setupPairs.push([a, b]);
         renderSetupPairs();
@@ -1348,6 +1417,7 @@
       if (box && box.id === 'tsetup-pairs') {
         tourPairs = tourPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
         renderTournamentPairs();
+        updateTournamentCounts();
       } else {
         setupPairs = setupPairs.filter(function (p) { return p[0] !== playerId && p[1] !== playerId; });
         renderSetupPairs();
@@ -1374,6 +1444,36 @@
     toast(session.matchBySkill
       ? 'Match by skill is on. From the next game, courts are made of players close in rating.'
       : 'Match by skill is off. Longest wait first, as before.');
+  }
+
+  /* Flip mixed-level pairs for the running tournament. Turning it off splits
+     any pair of different levels, after asking, since such a pair could no
+     longer be seated. Games in progress are not touched either way. */
+  function toggleMixedPairs() {
+    var session = activeSession();
+    if (!session || !session.tournament) return;
+    var byId = playersById();
+    var name = function (id) { return byId[id] ? byId[id].name : '?'; };
+    if (session.mixedPairs) {
+      var mixed = (session.pairs || []).filter(function (p) { return divisionOf(byId, p[0]) !== divisionOf(byId, p[1]); });
+      if (mixed.length) {
+        var who = mixed.map(function (p) { return name(p[0]) + ' & ' + name(p[1]); }).join(', ');
+        if (!confirm('Turning this off splits ' + (mixed.length === 1 ? 'the pair ' : mixed.length + ' pairs: ') + who +
+          ', since partners must then be in the same division. Continue?')) return;
+        mixed.forEach(function (p) { Engine.clearPair(session, p[0]); });
+      }
+      session.mixedPairs = false;
+    } else {
+      session.mixedPairs = true;
+    }
+    // A pair that could not be seated may now fit; split partners are singles.
+    var started = Engine.fillCourts(session, byId);
+    persist();
+    renderPlay();
+    toast((session.mixedPairs
+      ? 'Mixed-level pairs are on. Partners of different levels play as a pair in the higher partner\'s division.'
+      : 'Mixed-level pairs are off. Partners must be in the same division.') +
+      (started.length ? ' A free court just filled.' : ''));
   }
 
   function endSession() {
@@ -1431,7 +1531,9 @@
 
   /* A level edited during a tournament can move a player to another
      division. Their line changes from now; a game in progress finishes as
-     it is. A fixed pair that would now straddle two divisions is split. */
+     it is. A fixed pair that would now straddle two divisions is split -
+     unless mixed-level pairs are allowed, when the pair simply plays in the
+     higher partner's division from here on. */
   function tournamentLevelChange(playerId, fromDivision, byId) {
     var session = activeSession();
     if (!session || !session.tournament || session.playerIds.indexOf(playerId) < 0) return '';
@@ -1440,8 +1542,13 @@
     var note = ' ' + byId[playerId].name + ' now plays in the ' + Engine.divisionLabel(toDivision) + ' division.';
     var partner = Engine.fixedPairs(session)[playerId];
     if (partner && divisionOf(byId, partner) !== toDivision) {
-      Engine.clearPair(session, playerId);
-      note += ' Their fixed pair was split: partners must be in the same division.';
+      if (Engine.mixedPairs(session)) {
+        note = ' ' + byId[playerId].name + ' and ' + (byId[partner] ? byId[partner].name : '?') +
+          ' now play as a pair in the ' + Engine.divisionLabel(Engine.playerDivision(session, byId, playerId)) + ' division.';
+      } else {
+        Engine.clearPair(session, playerId);
+        note += ' Their fixed pair was split: partners must be in the same division.';
+      }
     }
     if (Engine.fillCourts(session, byId).length) note += ' A free court just filled.';
     return note;
@@ -1620,6 +1727,7 @@
         removePair(t.getAttribute('data-player'), t.closest('#setup-pairs, #session-pairs, #tsetup-pairs'));
         break;
       case 'toggle-skill-match': toggleSkillMatch(); break;
+      case 'toggle-mixed-pairs': toggleMixedPairs(); break;
       case 'end-session': endSession(); break;
       case 'add-player': addPlayer(); break;
       case 'edit-player': e.stopPropagation(); showEditPlayer(t.getAttribute('data-player')); break;
@@ -1649,8 +1757,18 @@
       renderSetupPairs();
     }
     if (e.target.classList && e.target.classList.contains('tsetup-player')) {
-      updateTournamentCounts();
       renderTournamentPairs();
+      updateTournamentCounts();
+    }
+    if (e.target.id === 'tsetup-mixed-pairs') {
+      tourMixedPairs = e.target.checked;
+      var note = document.querySelector('#view-tournament .mixed-note');
+      if (note) note.textContent = mixedPairsNote(tourMixedPairs);
+      var before = tourPairs.length;
+      renderTournamentPairs();     // turned off: pairs of different levels are dropped
+      updateTournamentCounts();
+      var dropped = before - tourPairs.length;
+      if (dropped) toast(dropped + (dropped === 1 ? ' pair' : ' pairs') + ' of different levels removed.');
     }
     if (e.target.id === 'edit-player-photo') photoChosen(e.target);
   });

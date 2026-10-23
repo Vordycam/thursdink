@@ -9,7 +9,7 @@
       version: 1,
       players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived, photo?: small JPEG data URL}
       sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, pairs, games, status,
-                     //  matchBySkill?, tournament?}  (a tournament game also carries its division as category)
+                     //  matchBySkill?, tournament?, mixedPairs?}  (a tournament game also carries its division as category)
     };
   }
 

@@ -1053,3 +1053,171 @@ test('tournament: a late joiner goes to the back of the line in their own divisi
   assert.ok(four.includes('E'), 'E has waited since the start with no games');
   assert.equal(g.category, 'Novice');
 });
+
+/* ── tournament: mixed-level pairs ────────────────────────────────────── */
+
+test('mixed-level pairs are off unless the tournament turns them on', () => {
+  const sess = session(['A', 'B', 'C', 'D']);
+  sess.tournament = true;
+  assert.equal(Engine.mixedPairs(sess), false, 'tournaments saved before this option have no flag');
+  sess.mixedPairs = true;
+  assert.equal(Engine.mixedPairs(sess), true);
+});
+
+test('mixed-level pairs: setPair allows partners of different levels only when the host turns it on', () => {
+  const table = { A: '3.0', B: '4.0', C: '3.5', D: '3.5', E: '4.0', F: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table));
+  sess.tournament = true;
+  sess.pairs = [];
+  const refused = Engine.setPair(sess, 'A', 'B', byId);
+  assert.equal(refused.ok, false, 'off: a Novice and an Intermediate cannot pair');
+  assert.match(refused.error, /same division/);
+  sess.mixedPairs = true;
+  assert.equal(Engine.setPair(sess, 'A', 'B', byId).ok, true, 'on: they can');
+  assert.deepEqual(sess.pairs, [['A', 'B']]);
+  assert.equal(Engine.setPair(sess, 'C', 'D', byId).ok, true, 'same-division pairs still pair');
+});
+
+test('mixed-level pairs: a pair of different levels is in the higher division, and only when allowed', () => {
+  const table = { A: '2.0', B: '3.5', C: '4.5', U: 'x' };   // U is off the scale
+  const byId = levelled(table);
+  const unit = { ids: ['A', 'B'] };
+  assert.equal(Engine.unitCategory(unit, byId), null, 'without a session, as before: cannot be seated');
+  assert.equal(Engine.unitCategory(unit, byId, { tournament: true }), null, 'off: cannot be seated');
+  assert.equal(Engine.unitCategory(unit, byId, { tournament: true, mixedPairs: true }), 'Novice', 'on: the pair plays up');
+  assert.equal(Engine.unitCategory({ ids: ['C', 'A'] }, byId, { mixedPairs: true }), 'Intermediate', 'order does not matter');
+  assert.equal(Engine.unitCategory({ ids: ['U', 'A'] }, byId, { mixedPairs: true }), 'Beginner',
+    'an unrated partner plays in the rated partner\'s division');
+  assert.equal(Engine.unitCategory({ ids: ['B', 'B'] }, byId, { mixedPairs: true }), 'Novice', 'a same-division unit is unchanged');
+  assert.equal(Engine.unitCategory({ ids: ['B'] }, byId, { mixedPairs: true }), 'Novice');
+});
+
+test('mixed-level pairs: playerDivision is the pair\'s division for a partner playing up, else their own level', () => {
+  const table = { A: '3.0', B: '4.0', C: '3.5', D: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table));
+  sess.tournament = true;
+  sess.pairs = [['A', 'B']];
+  assert.equal(Engine.playerDivision(sess, byId, 'A'), 'Novice', 'off: the straddling pair cannot be seated, so A is read by level');
+  assert.equal(Engine.playerDivision(sess, byId, 'C'), 'Novice');
+  sess.mixedPairs = true;
+  assert.equal(Engine.playerDivision(sess, byId, 'A'), 'Intermediate', 'on: A plays up with B');
+  assert.equal(Engine.playerDivision(sess, byId, 'B'), 'Intermediate');
+  assert.equal(Engine.playerDivision(sess, byId, 'C'), 'Novice', 'a single is unchanged');
+  sess.pairs = [['C', 'D']];
+  assert.equal(Engine.playerDivision(sess, byId, 'A'), 'Novice', 'unpaired again');
+});
+
+test('mixed-level pairs: the pair plays every game together in the higher division, courts otherwise unmixed', () => {
+  // A (Novice) pairs with B (Intermediate), so they play as Intermediates.
+  // Four other Novices, four other Intermediates and four Beginners on two
+  // courts, over a long night of random game lengths.
+  const table = {
+    A: '3.0', B: '4.0',
+    C: '3.0', D: '3.5', E: '3.5', F: '3.5',
+    G: '4.0', H: '4.0', I: '4.5', J: '4.5',
+    K: '1.5', L: '2.0', M: '2.5', N: '2.5',
+  };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  sess.mixedPairs = true;
+  sess.pairs = [['A', 'B']];
+  Engine.fillCourts(sess, byId);
+  for (let round = 0; round < 40; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(2 * MIN + Math.floor(Math.random() * 6 * MIN));
+    Engine.completeGame(g, 11, Math.floor(Math.random() * 11));
+    Engine.fillCourts(sess, byId);
+  }
+  let pairGames = 0;
+  sess.games.forEach((g) => {
+    const four = onCourt(g);
+    if (four.includes('A') || four.includes('B')) {
+      pairGames++;
+      assert.ok(sameTeam(g, 'A', 'B'), `the pair is split: ${g.teamA} v ${g.teamB}`);
+      assert.equal(g.category, 'Intermediate', 'the pair plays up');
+      four.filter((id) => id !== 'A' && id !== 'B').forEach((id) => {
+        assert.equal(Engine.skillCategory(byId[id].skill), 'Intermediate', `${id} is not an Intermediate`);
+      });
+    } else {
+      const cats = categoriesOf(g, byId);
+      assert.ok(cats.every((c) => c === cats[0]), `mixed court: ${g.teamA} v ${g.teamB} (${cats})`);
+      assert.equal(g.category, cats[0]);
+    }
+  });
+  assert.ok(pairGames >= 5, `the pair played only ${pairGames} games`);
+  const counts = Engine.sessionCounts(sess).games;
+  Object.keys(table).forEach((id) => assert.ok(counts[id] >= 5, `${id} played only ${counts[id]} games`));
+});
+
+test('mixed-level pairs: standings list the partner playing up in the higher division, and a result stays put', () => {
+  const table = { A: '3.0', B: '4.0', C: '3.0', D: '3.5', E: '3.5', F: '3.5', G: '4.0', H: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 1);
+  sess.tournament = true;
+  sess.mixedPairs = true;
+  sess.pairs = [['A', 'B']];
+  let divs = Engine.tournamentDivisions(sess, byId);
+  assert.deepEqual(divs.find((d) => d.name === 'Intermediate').ids.sort(), ['A', 'B', 'G', 'H'], 'before any game: by pair');
+  assert.deepEqual(divs.find((d) => d.name === 'Novice').ids.sort(), ['C', 'D', 'E', 'F']);
+
+  sess.games.push({
+    id: 'x1', court: 1, seq: sess.nextSeq++, teamA: ['A', 'B'], teamB: ['G', 'H'],
+    scoreA: 11, scoreB: 4, done: true, finishedAt: clock, ratingDeltas: null, category: 'Intermediate',
+  });
+  sess.pairs = [];
+  sess.mixedPairs = false;
+  divs = Engine.tournamentDivisions(sess, byId);
+  assert.ok(divs.find((d) => d.name === 'Intermediate').ids.includes('A'), 'A played as an Intermediate: the result stays there');
+  assert.ok(!divs.find((d) => d.name === 'Novice').ids.includes('A'));
+});
+
+test('mixed-level pairs: a Beginner paired with a Novice plays in Novice; the other three Beginners still wait', () => {
+  const table = { P: '2.0', Q: '3.0', A: '2.0', B: '2.5', C: '2.5', D: '3.0', E: '3.5', F: '3.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 2);
+  sess.tournament = true;
+  sess.mixedPairs = true;
+  sess.pairs = [['P', 'Q']];
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1, 'only the Novice court fills: P plays up, leaving three Beginners');
+  const four = onCourt(started[0]);
+  assert.ok(four.includes('P') && four.includes('Q') && sameTeam(started[0], 'P', 'Q'), `the pair plays together: ${four}`);
+  assert.equal(started[0].category, 'Novice');
+  four.filter((id) => id !== 'P' && id !== 'Q').forEach((id) => assert.equal(Engine.skillCategory(byId[id].skill), 'Novice'));
+  const pool = Engine.waitingPool(sess);
+  assert.ok(['A', 'B', 'C'].every((id) => pool.includes(id)), 'three Beginners cannot fill a court');
+
+  // Turned off again mid-tournament: the pair can no longer be seated, and
+  // with it gone neither division has four.
+  advance(10 * MIN);
+  Engine.completeGame(started[0], 11, 3);
+  sess.mixedPairs = false;
+  const unit = Engine.queueUnits(sess, byId).find((u) => u.ids.includes('P'));
+  assert.equal(Engine.unitCategory(unit, byId, sess), null);
+  assert.equal(Engine.fillCourts(sess, byId).length, 0);
+});
+
+test('mixed-level pairs: a level edited apart mid-tournament moves the pair up instead of stranding it', () => {
+  const table = { A: '3.0', B: '3.5', C: '3.0', D: '3.5', E: '4.0', F: '4.0', G: '4.5' };
+  const byId = levelled(table);
+  const sess = session(Object.keys(table), 1);
+  sess.tournament = true;
+  sess.pairs = [['A', 'B']];
+  const g1 = Engine.fillCourts(sess, byId)[0];
+  assert.equal(g1.category, 'Novice', 'the four Novices fill the court; three Intermediates cannot');
+  advance(5 * MIN);
+  Engine.completeGame(g1, 11, 6);
+  byId.B.skill = '4.0';
+  assert.equal(Engine.fillCourts(sess, byId).length, 0, 'off: the pair straddles and nobody can fill a court');
+  sess.mixedPairs = true;
+  const g2 = Engine.fillCourts(sess, byId)[0];
+  assert.equal(g2.category, 'Intermediate');
+  assert.ok(sameTeam(g2, 'A', 'B'));
+  onCourt(g2).filter((id) => id !== 'A' && id !== 'B').forEach((id) => {
+    assert.equal(Engine.skillCategory(byId[id].skill), 'Intermediate', `${id} is not an Intermediate`);
+  });
+});

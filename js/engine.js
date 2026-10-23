@@ -7,7 +7,9 @@
    line and always land on the same team. A session may also match by skill:
    courts are then built around the longest wait from the players closest to
    them in rating. A tournament goes further: every game is played within
-   one division, the group's skill categories, and divisions never mix. */
+   one division, the group's skill categories, and divisions never mix. The
+   host may allow fixed partners of different levels; such a pair then plays
+   in the higher partner's division. */
 (function () {
   'use strict';
 
@@ -103,6 +105,18 @@
     return !!session.tournament;
   }
 
+  /*
+   * Mixed pairs is a per-tournament option, off unless the host turns it
+   * on. Off, fixed partners must be in the same division, as a tournament
+   * always required. On, two players of different levels may pair up; the
+   * pair then plays in the higher partner's division - the usual tournament
+   * rule, so nobody plays down - and courts are still never mixed beyond
+   * that: every other seat on the court is that division's.
+   */
+  function mixedPairs(session) {
+    return !!session.mixedPairs;
+  }
+
   /* The division a player plays in: the category of their declared level.
      '' for a level off the scale; such players form a division of their own. */
   function playerCategory(playersById, id) {
@@ -115,14 +129,43 @@
     return category || 'Unrated';
   }
 
-  /* A unit's division, or null when its members are in different ones - a
-     fixed pair whose levels were edited apart. Such a unit is never seated. */
-  function unitCategory(unit, playersById) {
-    var cat = playerCategory(playersById, unit.ids[0]);
-    for (var i = 1; i < unit.ids.length; i++) {
-      if (playerCategory(playersById, unit.ids[i]) !== cat) return null;
+  /* Where a category sits on the scale; the unrated group is below it. */
+  function categoryRank(category) {
+    for (var i = 0; i < SKILL_CATEGORIES.length; i++) {
+      if (SKILL_CATEGORIES[i].name === category) return i + 1;
     }
-    return cat;
+    return 0;
+  }
+
+  function higherCategory(a, b) {
+    return categoryRank(b) > categoryRank(a) ? b : a;
+  }
+
+  /* A unit's division. Members in different divisions - a fixed pair of
+     different levels - make it the higher one when the session allows mixed
+     pairs, and null otherwise: such a unit is never seated. Without the
+     session, as before this option, a mixed unit is null. */
+  function unitCategory(unit, playersById, session) {
+    var cat = playerCategory(playersById, unit.ids[0]);
+    var mixed = false, highest = cat;
+    for (var i = 1; i < unit.ids.length; i++) {
+      var other = playerCategory(playersById, unit.ids[i]);
+      if (other !== cat) mixed = true;
+      highest = higherCategory(highest, other);
+    }
+    if (!mixed) return cat;
+    return session && mixedPairs(session) ? highest : null;
+  }
+
+  /* The division a player plays in: their fixed pair's, when they have a
+     partner and the pair can be seated, otherwise their own level's. */
+  function playerDivision(session, playersById, id) {
+    var partner = fixedPairs(session)[id];
+    if (partner) {
+      var cat = unitCategory({ ids: [id, partner] }, playersById, session);
+      if (cat !== null) return cat;
+    }
+    return playerCategory(playersById, id);
   }
 
   function initialRating(skill) {
@@ -214,13 +257,15 @@
 
   /* Make two checked-in players a pair. Anyone can be in only one pair, so
      an earlier pair involving either of them is replaced. In a tournament,
-     given the players, both must be in the same division. */
+     given the players, both must be in the same division unless the host
+     allows mixed pairs. */
   function setPair(session, a, b, playersById) {
     if (!a || !b || a === b) return { ok: false, error: 'Pick two different players.' };
     if (session.playerIds.indexOf(a) < 0 || session.playerIds.indexOf(b) < 0) {
       return { ok: false, error: 'Both players must be checked in to this session.' };
     }
-    if (tournament(session) && playersById && playerCategory(playersById, a) !== playerCategory(playersById, b)) {
+    if (tournament(session) && !mixedPairs(session) && playersById &&
+        playerCategory(playersById, a) !== playerCategory(playersById, b)) {
       return { ok: false, error: 'In a tournament, partners must be in the same division.' };
     }
     clearPair(session, a);
@@ -556,10 +601,11 @@
     if (!tournament(session)) return pickNext(units, counts, fixed, skill, ratingOf);
 
     // The units are already in queue order, so the first seen from each
-    // division is that division's claim on the court.
+    // division is that division's claim on the court. A mixed pair, where
+    // allowed, is in the higher partner's division.
     var byCat = {}, order = [];
     units.forEach(function (u) {
-      var cat = unitCategory(u, playersById);
+      var cat = unitCategory(u, playersById, session);
       if (cat === null) return;
       if (!byCat[cat]) { byCat[cat] = []; order.push(cat); }
       byCat[cat].push(u);
@@ -850,11 +896,12 @@
    * A tournament's divisions in scale order, each with everyone who is or
    * was part of it. A player's division is the one of the last game they
    * played, so a level edited after the night does not move their results;
-   * until they have played it is their current level.
+   * until they have played it is their current level - or their pair's,
+   * for a partner of a different level who is allowed to play up.
    */
   function tournamentDivisions(session, playersById) {
     var of = {};
-    sessionParticipants(session).forEach(function (id) { of[id] = playerCategory(playersById, id); });
+    sessionParticipants(session).forEach(function (id) { of[id] = playerDivision(session, playersById, id); });
     sessionMatches(session).forEach(function (m) {
       if (!m.done || m.category === undefined) return;
       m.teamA.concat(m.teamB).forEach(function (id) { of[id] = m.category; });
@@ -970,7 +1017,9 @@
     resetProgress: resetProgress,
     matchBySkill: matchBySkill,
     tournament: tournament,
+    mixedPairs: mixedPairs,
     playerCategory: playerCategory,
+    playerDivision: playerDivision,
     unitCategory: unitCategory,
     divisionLabel: divisionLabel,
     tournamentDivisions: tournamentDivisions,

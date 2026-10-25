@@ -1538,7 +1538,7 @@ test('sessionSummary: games, the timed average and longest, the closest and bigg
   const byId = players(['A', 'B', 'C', 'D']);
   const sess = session(['A', 'B', 'C', 'D'], 1);
   assert.deepEqual(Engine.sessionSummary(sess),
-    { games: 0, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null });
+    { games: 0, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null, climber: null });
   const g1 = Engine.fillCourts(sess, byId)[0];
   advance(10 * MIN);
   Engine.completeGame(g1, 11, 9);
@@ -1599,6 +1599,7 @@ test('sessionRecap: a plain-text recap with the night in numbers and the standin
     '5 players, 2 games, 2 courts',
     'Average game 15m 00s; longest 18m 00s: Eve & Cat 10-11 Ann & Bob',
     'Closest game: Eve & Cat 10-11 Ann & Bob',
+    'Biggest win: Ann & Bob 11-4 Cat & Dan',
     '',
     'Standings',
     '1. Ann 2-0 (100%, +8)',
@@ -1640,4 +1641,147 @@ test('sessionRecap: a division tournament lists a board per division; two groups
   assert.ok(gt.indexOf('\nReds\n1. B 1-0 (100%, +4)\n2. A 1-1 (50%, +2)\n3. C 0-1 (0%, -2)\n') > 0, gt);
   assert.ok(gt.indexOf('\nBlues\n1. M 1-0 (100%, +2)\n2. K 1-1 (50%, -2)\n3. L 0-1 (0%, -4)') > 0, gt);
   assert.ok(gt.indexOf('\nReds\n') < gt.indexOf('\nBlues\n'));
+});
+
+/* ── undo a score, the climber and biggest win, form ──────────────────── */
+
+test('undoScore: the game goes back on with no score and the games it started are withdrawn', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']);
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H'], 1);
+  const g1 = Engine.fillCourts(sess, byId)[0];
+  advance(10 * MIN);
+  Engine.completeGame(g1, 11, 3);
+  g1.ratingDeltas = Engine.computeRatingDeltas(g1, byId);
+  Engine.applyDeltas(g1.ratingDeltas, byId, 1);
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1);
+  assert.equal(sess.games.length, 2);
+
+  const r = Engine.undoScore(sess, g1.id, started.map((g) => g.id));
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.game, g1);
+  assert.equal(r.withdrawn, 1);
+  assert.equal(sess.games.length, 1, 'the game that followed is gone');
+  assert.equal(g1.done, false);
+  assert.equal(g1.scoreA, null);
+  assert.equal(g1.scoreB, null);
+  assert.equal(g1.finishedAt, null);
+  assert.equal(g1.startedAt, sess.startedAt, 'the clock keeps running from the original start');
+  assert.deepEqual(Engine.activeGames(sess).map((g) => g.id), [g1.id]);
+  assert.equal(Engine.waitingPool(sess).length, 4);
+  Engine.undoDeltas(g1.ratingDeltas, byId);
+  g1.ratingDeltas = null;
+  Object.keys(byId).forEach((id) => {
+    assert.equal(byId[id].rating, Engine.initialRating('3.5'), `${id} rating put back`);
+    assert.equal((byId[id].ratingHistory || []).length, 0, `${id} history point removed`);
+  });
+  // Scored again: everything proceeds as normal.
+  Engine.completeGame(g1, 11, 9);
+  assert.equal(Engine.fillCourts(sess, byId).length, 1);
+});
+
+test('undoScore: refused once a following game is scored or someone has moved to another court', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']);
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'], 2);
+  const [g1, g2] = Engine.fillCourts(sess, byId);
+  advance(8 * MIN);
+  Engine.completeGame(g1, 11, 2);
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1);
+  advance(2 * MIN);
+  Engine.completeGame(started[0], 11, 7);
+  let r = Engine.undoScore(sess, g1.id, started.map((g) => g.id));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /A game that followed has been scored/);
+  assert.equal(g1.done, true, 'nothing changed');
+  assert.equal(sess.games.length, 3);
+
+  // A fresh case: the host moves one of the scored game's players onto court 2 by hand.
+  const sess2 = session(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'], 2);
+  const [h1, h2] = Engine.fillCourts(sess2, byId);
+  advance(5 * MIN);
+  Engine.completeGame(h1, 11, 4);
+  const next = Engine.fillCourts(sess2, byId);
+  h2.teamA = [h1.teamA[0], h2.teamA[1]];           // edited matchup pulls a player across
+  r = Engine.undoScore(sess2, h1.id, next.map((g) => g.id));
+  assert.equal(r.ok, false);
+  assert.match(r.error, /already on another court/);
+  assert.equal(h1.done, true);
+
+  r = Engine.undoScore(sess2, 'nope', []);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no longer there/);
+  r = Engine.undoScore(sess2, h2.id, []);
+  assert.equal(r.ok, false, 'a game in progress has no score to take back');
+});
+
+test('undoDeltas: puts the rating back and removes only the history point that score left', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  byId.A.ratingHistory = [{ t: 1, r: 1200 }];
+  byId.A.rating = 1200;
+  const deltas = { A: 16, B: 16, C: -16, D: -16 };
+  Engine.applyDeltas(deltas, byId, 1);
+  assert.equal(byId.A.rating, 1216);
+  assert.equal(byId.A.ratingHistory.length, 2);
+  Engine.undoDeltas(deltas, byId);
+  assert.equal(byId.A.rating, 1200);
+  assert.deepEqual(byId.A.ratingHistory, [{ t: 1, r: 1200 }], 'the earlier point stays');
+  assert.equal(byId.C.rating, Engine.initialRating('3.5'));
+  assert.equal(byId.C.ratingHistory.length, 0);
+  byId.B.ratingHistory = [];                        // a history already cleared elsewhere: still fine
+  Engine.undoDeltas({ B: 5, Z: 5 }, byId);
+  assert.equal(byId.B.rating, Engine.initialRating('3.5') - 5);
+});
+
+test('sessionSummary and the recap: the climber of the night and the biggest win', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  const sess = session(['A', 'B', 'C', 'D'], 1);
+  assert.equal(Engine.sessionSummary(sess).climber, null);
+  played(sess, ['A', 'B'], ['C', 'D'], 11, 2);
+  sess.games[0].ratingDeltas = { A: 16, B: 16, C: -16, D: -16 };
+  played(sess, ['A', 'C'], ['B', 'D'], 11, 10);
+  sess.games[1].ratingDeltas = { A: 14, C: 14, B: -14, D: -14 };
+  const sum = Engine.sessionSummary(sess);
+  assert.deepEqual(sum.climber, { id: 'A', change: 30 }, 'A rose most');
+  assert.equal(sum.biggest, sess.games[0]);
+  assert.equal(sum.closest, sess.games[1]);
+  const text = Engine.sessionRecap(sess, byId, 'd');
+  assert.ok(text.indexOf('\nClosest game: A & C 11-10 B & D\nBiggest win: A & B 11-2 C & D\nClimber of the night: A (+30)\n') > 0, text);
+
+  // One game: closest and biggest are the same, so it is said once; nobody up, no climber.
+  const one = session(['A', 'B', 'C', 'D'], 1);
+  played(one, ['A', 'B'], ['C', 'D'], 11, 5);
+  one.games[0].ratingDeltas = { A: 0, B: 0, C: 0, D: 0 };
+  const s1 = Engine.sessionSummary(one);
+  assert.equal(s1.climber, null);
+  const t1 = Engine.sessionRecap(one, byId, 'd');
+  assert.ok(t1.indexOf('Closest game: A & B 11-5 C & D') > 0);
+  assert.equal(t1.indexOf('Biggest win'), -1);
+  assert.equal(t1.indexOf('Climber'), -1);
+  // Ties go to the first id.
+  one.games[0].ratingDeltas = { A: 9, B: 9, C: -9, D: -9 };
+  assert.deepEqual(Engine.sessionSummary(one).climber, { id: 'A', change: 9 });
+});
+
+test('playerForm: the last results, oldest first, across sessions', () => {
+  const s1 = session(['A', 'B', 'C', 'D'], 1);
+  played(s1, ['A', 'B'], ['C', 'D'], 11, 5);       // A wins
+  advance(MIN);
+  played(s1, ['C', 'D'], ['A', 'B'], 11, 7);       // A loses
+  advance(MIN);
+  played(s1, ['A', 'C'], ['B', 'D'], 11, 9);       // A wins
+  s1.games.push({ id: 'live', court: 1, seq: 9, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: null, scoreB: null, done: false });
+  const s2 = session(['A', 'B', 'C', 'D'], 1);
+  played(s2, ['B', 'D'], ['A', 'C'], 11, 1);       // A loses
+  advance(MIN);
+  played(s2, ['A', 'D'], ['B', 'C'], 11, 8);       // A wins
+  assert.deepEqual(Engine.playerForm('A', [s1, s2], 5), ['W', 'L', 'W', 'L', 'W']);
+  assert.deepEqual(Engine.playerForm('A', [s1, s2], 3), ['W', 'L', 'W'], 'the most recent three');
+  assert.deepEqual(Engine.playerForm('C', [s1, s2], 5), ['L', 'W', 'W', 'L', 'L']);
+  assert.deepEqual(Engine.playerForm('Z', [s1, s2], 5), []);
+  // Finish order wins over sequence: a court that finished later is later.
+  const s3 = session(['A', 'B', 'C', 'D'], 2);
+  s3.games.push({ id: 'x1', court: 1, seq: 1, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: 11, scoreB: 0, done: true, finishedAt: clock + 500 });
+  s3.games.push({ id: 'x2', court: 2, seq: 2, teamA: ['C', 'D'], teamB: ['A', 'B'], scoreA: 11, scoreB: 0, done: true, finishedAt: clock + 100 });
+  assert.deepEqual(Engine.playerForm('A', [s3], 5), ['L', 'W']);
 });

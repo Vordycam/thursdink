@@ -19,7 +19,42 @@
     if (changed) Storage_.save(DB);
   })();
 
-  function persist() { return Storage_.save(DB); }
+  /* Every saved change but a score itself ends the chance to undo that
+     score: once anything else has moved on, the score stands. */
+  function persist() {
+    lastUndo = null;
+    return Storage_.save(DB);
+  }
+
+  /* The last score saved, while it can still be taken back: which game,
+     and the games its finish started. Not kept across a reload. */
+  var lastUndo = null;
+
+  function undoButtonHtml(session) {
+    return lastUndo && lastUndo.sessionId === session.id
+      ? '<button class="btn small" data-action="undo-score">Undo last score</button>' : '';
+  }
+
+  function undoLastScore() {
+    var session = activeSession();
+    if (!session || !lastUndo || lastUndo.sessionId !== session.id) return;
+    var byId = playersById();
+    var r = Engine.undoScore(session, lastUndo.gameId, lastUndo.startedIds);
+    if (!r.ok) {
+      lastUndo = null;
+      renderPlay();
+      toast(r.error);
+      return;
+    }
+    if (r.game.ratingDeltas) {
+      Engine.undoDeltas(r.game.ratingDeltas, byId);
+      r.game.ratingDeltas = null;
+    }
+    persist();
+    renderPlay();
+    toast('Court ' + r.game.court + ': score taken back, the game is on again.' +
+      (r.withdrawn ? ' ' + r.withdrawn + (r.withdrawn === 1 ? ' game' : ' games') + ' that followed withdrawn.' : ''));
+  }
 
   function playersById() {
     var map = {};
@@ -401,6 +436,7 @@
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
       '<button class="btn small' + (skill ? ' on' : '') + '" data-action="toggle-skill-match">Skill match: ' + (skill ? 'On' : 'Off') + '</button>' +
+      undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End session</button>' +
       '</div></div>';
 
@@ -665,7 +701,9 @@
       '<div class="field"><label>Who is playing? <span class="muted" id="tsetup-count"></span></label>' +
       '<div class="setup-actions"><button class="btn small" data-action="tsetup-all">Select all</button>' +
       '<button class="btn small" data-action="tsetup-none">Select none</button>' +
-      '<button class="btn small only-groups" data-action="tsetup-autosplit">Auto-split by skill</button></div>' +
+      '<button class="btn small only-groups" data-action="tsetup-autosplit">Auto-split by skill</button>' +
+      (lastGroupSession() ? '<button class="btn small only-groups" data-action="tsetup-reuse-groups">Use last tournament\'s groups</button>' : '') +
+      '</div>' +
       '<div class="check-list divisions-list">' + divisions + '</div>' +
       '<p class="muted small-note only-divisions">A division needs 4 players checked in to get a court. ' +
       'To move someone to another division, change their level on the Players tab.</p>' +
@@ -753,6 +791,38 @@
     refreshSetupGroups();
     var names = groupNames();
     toast('Split by skill: ' + names[0] + ' ' + size[0] + ', ' + names[1] + ' ' + size[1] + '.');
+  }
+
+  /* The most recent two-group tournament, or null. */
+  function lastGroupSession() {
+    for (var i = DB.sessions.length - 1; i >= 0; i--) {
+      if (Engine.groupPlay(DB.sessions[i])) return DB.sessions[i];
+    }
+    return null;
+  }
+
+  /* Take the names and the groups from the last two-group tournament, for
+     everyone still in the roster. The same company teams, week after week. */
+  function reuseLastGroups() {
+    var last = lastGroupSession();
+    if (!last) return;
+    var byId = playersById();
+    tourGroupNames = [Engine.groupLabel(last, 0), Engine.groupLabel(last, 1)];
+    tourGroupOf = {};
+    var per = [0, 0];
+    Object.keys(last.groups.of).forEach(function (id) {
+      var g = Engine.playerGroup(last, id);
+      if (g >= 0 && byId[id] && !byId[id].archived) { tourGroupOf[id] = g; per[g]++; }
+    });
+    document.querySelectorAll('#view-tournament .group-name').forEach(function (input) {
+      input.value = tourGroupNames[parseInt(input.getAttribute('data-group'), 10)] || '';
+    });
+    var names = groupNames();
+    document.querySelectorAll('#view-tournament .grp-opt').forEach(function (b) {
+      b.textContent = names[parseInt(b.getAttribute('data-group'), 10)];
+    });
+    refreshSetupGroups();
+    toast('Groups from ' + fmtDate(last.startedAt) + ': ' + names[0] + ' ' + per[0] + ', ' + names[1] + ' ' + per[1] + '.');
   }
 
   /* Redraw the group switches, the pairs block and the counts after a
@@ -881,6 +951,7 @@
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
       '<button class="btn small' + (mixedOn ? ' on' : '') + '" data-action="toggle-mixed-pairs">Mixed-level pairs: ' +
       (mixedOn ? 'On' : 'Off') + '</button>' +
+      undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
       '</div></div>';
 
@@ -986,6 +1057,7 @@
       '<div class="session-bar-actions tour-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
+      undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
       '</div></div>';
 
@@ -1171,11 +1243,75 @@
     }).join(', ');
   }
 
+  /* "today", "yesterday", "5 days ago", "3 weeks ago", "4 months ago". */
+  function agoText(ms) {
+    var days = Math.floor(ms / 86400000);
+    if (days < 1) return 'today';
+    if (days < 2) return 'yesterday';
+    if (days < 14) return days + ' days ago';
+    if (days < 60) return Math.floor(days / 7) + ' weeks ago';
+    return Math.floor(days / 30) + ' months ago';
+  }
+
+  /* The data lives only on this device, so the backup's age matters. Stale
+     means no backup in four weeks - or none at all once there is a second
+     session to lose. */
+  var BACKUP_STALE_MS = 28 * 86400000;
+
+  function backupStale() {
+    if (!DB.lastBackupAt) return DB.sessions.length >= 2;
+    return Date.now() - DB.lastBackupAt > BACKUP_STALE_MS;
+  }
+
+  function backupNoteHtml() {
+    var stale = backupStale();
+    var text = DB.lastBackupAt
+      ? 'Last backup: ' + fmtDate(DB.lastBackupAt) + ' (' + agoText(Date.now() - DB.lastBackupAt) + ').' +
+        (stale ? ' It is getting old: export a fresh one.' : '')
+      : 'No backup yet. Everything here lives only on this device, so export a backup now and then.';
+    return '<p class="muted small-note backup-note' + (stale ? ' warn' : '') + '">' + text + '</p>';
+  }
+
+  /* The nudge on the end-of-session toast, or ''. */
+  function backupNudge() {
+    if (!backupStale()) return '';
+    return DB.lastBackupAt
+      ? ' Your last backup was ' + agoText(Date.now() - DB.lastBackupAt) + ': export one on the Stats tab.'
+      : ' No backup yet: export one on the Stats tab.';
+  }
+
+  /* The all-time board can be narrowed to a period; the default shows
+     everything, as before. */
+  var statsPeriod = 'all';
+
+  function periodSessions() {
+    if (statsPeriod === 'all') return DB.sessions;
+    var now = new Date(Date.now());
+    var cutoff = statsPeriod === 'year'
+      ? new Date(now.getFullYear(), 0, 1).getTime()
+      : Date.now() - 30 * 86400000;
+    return DB.sessions.filter(function (s) { return s.startedAt >= cutoff; });
+  }
+
+  function periodPickerHtml() {
+    var opts = [['all', 'All time'], ['30', 'Last 30 days'], ['year', 'This year']];
+    return '<div class="period-picker">' + opts.map(function (o) {
+      return '<button class="period-opt' + (statsPeriod === o[0] ? ' selected' : '') + '" data-action="stats-period" data-period="' + o[0] + '">' + o[1] + '</button>';
+    }).join('') + '</div>';
+  }
+
   function renderStats() {
     var view = document.getElementById('view-stats');
     var byId = playersById();
-    var stats = Engine.computeStats(DB.sessions);
+    var period = periodSessions();
+    var stats = Engine.computeStats(period);
     var board = leaderboardHtml(stats, byId);
+    var heading = statsPeriod === 'all' ? 'All-time leaderboard'
+      : statsPeriod === 'year' ? 'Leaderboard &middot; ' + new Date(Date.now()).getFullYear()
+      : 'Leaderboard &middot; last 30 days';
+    var none = statsPeriod === 'all'
+      ? 'No games recorded yet. Finish some games in a session first.'
+      : 'No games in this period.';
 
     var sessionsHtml = DB.sessions.slice().reverse().map(function (s) {
       return '<div class="player-row" data-action="session-detail" data-session="' + s.id + '">' +
@@ -1188,14 +1324,15 @@
     }).join('');
 
     view.innerHTML =
-      '<div class="card"><h2>All-time leaderboard</h2>' +
-      (board || '<p class="muted">No games recorded yet. Finish some games in a session first.</p>') +
+      '<div class="card"><h2>' + heading + '</h2>' + periodPickerHtml() +
+      (board || '<p class="muted">' + none + '</p>') +
       '<p class="muted small-note">Tap a player for their trend and history.</p></div>' +
       '<div class="card"><h2>Sessions (' + DB.sessions.length + ')</h2>' +
       (sessionsHtml || '<p class="muted">No sessions yet.</p>') + '</div>' +
       '<div class="card"><h2>Export &amp; backup</h2>' +
       '<p class="muted small-note">The PDF is a readable report you can share or print. ' +
       'The JSON backup is for restoring or moving your data to another device.</p>' +
+      backupNoteHtml() +
       '<div class="setup-actions">' +
       '<button class="btn primary" data-action="export-pdf">Export report (PDF)</button>' +
       '<button class="btn" data-action="export-data">Export backup (JSON)</button>' +
@@ -1274,6 +1411,7 @@
       '<div class="stat-box"><div class="stat-num">' + pct + '%</div><div class="stat-lbl">Win rate</div></div>' +
       '<div class="stat-box"><div class="stat-num">' + ((s.pf - s.pa) > 0 ? '+' : '') + (s.pf - s.pa) + '</div><div class="stat-lbl">Point diff</div></div>' +
       '</div>' +
+      formHtml(playerId) +
       companionsHtml(playerId, byId) +
       (sessionsHtml ? '<h3>Progression by session</h3>' + sessionsHtml : '') +
       '<div class="modal-actions">' +
@@ -1281,6 +1419,16 @@
       '<span class="spacer"></span>' +
       '<button class="btn" data-action="close-modal">Close</button></div>'
     );
+  }
+
+  /* A player's last five results, oldest first. Nothing until they have
+     finished a game. */
+  function formHtml(playerId) {
+    var form = Engine.playerForm(playerId, DB.sessions, 5);
+    if (!form.length) return '';
+    return '<p class="form-line muted small-note">Last ' + (form.length === 1 ? 'game' : form.length + ' games') + ': ' +
+      form.map(function (r) { return '<span class="form-' + r.toLowerCase() + '">' + r + '</span>'; }).join(' ') +
+      (form.length > 1 ? ' <span class="muted">(oldest first)</span>' : '') + '</p>';
   }
 
   /* Who a player plays with and against most, with the record from their
@@ -1361,13 +1509,17 @@
   function nightNumbersHtml(sess, byId) {
     var sum = Engine.sessionSummary(sess);
     if (!sum.games) return '';
-    var bits = [];
+    var rows = [];
     if (sum.timed) {
-      bits.push('Average game ' + Engine.fmtDuration(sum.avg));
-      bits.push('Longest ' + Engine.fmtDuration(sum.longestMs) + ': ' + resultLine(sum.longest, byId));
+      rows.push('Average game ' + Engine.fmtDuration(sum.avg));
+      rows.push('Longest ' + Engine.fmtDuration(sum.longestMs) + ': ' + resultLine(sum.longest, byId));
     }
-    if (sum.closest) bits.push('Closest: ' + resultLine(sum.closest, byId));
-    return '<p class="muted small-note night-numbers">' + bits.join(' &middot; ') + '</p>';
+    if (sum.closest) rows.push('Closest: ' + resultLine(sum.closest, byId));
+    if (sum.biggest && sum.biggest !== sum.closest) rows.push('Biggest win: ' + resultLine(sum.biggest, byId));
+    if (sum.climber && byId[sum.climber.id]) {
+      rows.push('Climber of the night: ' + esc(byId[sum.climber.id].name) + ' <span class="delta-up">+' + sum.climber.change + '</span>');
+    }
+    return '<ul class="muted small-note night-numbers">' + rows.map(function (r) { return '<li>' + r + '</li>'; }).join('') + '</ul>';
   }
 
   /* The recap as text: handed to the phone's share sheet when there is
@@ -1838,6 +1990,7 @@
     Engine.applyDeltas(m.ratingDeltas, byId, 1);
     var started = Engine.fillCourts(session, byId);
     persist();
+    lastUndo = { sessionId: session.id, gameId: m.id, startedIds: started.map(function (g) { return g.id; }) };
     renderPlay();
     if (started.length) {
       toast('Court ' + started.map(function (g) { return g.court; }).join(' & ') + ': next game is up!');
@@ -2035,7 +2188,7 @@
     renderPlay();
     renderStats();
     showSessionDetail(session.id);
-    toast(session.tournament ? 'Tournament saved.' : 'Session saved.');
+    toast((session.tournament ? 'Tournament saved.' : 'Session saved.') + backupNudge());
   }
 
   function savePlayer(playerId) {
@@ -2310,7 +2463,21 @@
         break;
       }
       case 'export-pdf': PdfReport.download(DB); toast('PDF report downloaded.'); break;
-      case 'export-data': Storage_.exportJson(DB); toast('Backup file downloaded.'); break;
+      case 'export-data':
+        // Noted first, so the backup itself records when it was taken.
+        DB.lastBackupAt = Date.now();
+        persist();
+        Storage_.exportJson(DB);
+        renderStats();
+        toast('Backup file downloaded.');
+        break;
+      case 'stats-period': {
+        var period = t.getAttribute('data-period');
+        if (period === 'all' || period === '30' || period === 'year') { statsPeriod = period; renderStats(); }
+        break;
+      }
+      case 'undo-score': undoLastScore(); break;
+      case 'tsetup-reuse-groups': reuseLastGroups(); break;
       case 'import-data': importData(); break;
       case 'reset-progress': resetProgress(); break;
       case 'reset-everything': resetEverything(); break;
@@ -2346,6 +2513,11 @@
 
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Enter' && e.target.id === 'new-player-name') addPlayer();
+    // Enter in a score box saves that court, for anyone scoring from a keyboard.
+    if (e.key === 'Enter' && e.target.classList && e.target.classList.contains('score-input')) {
+      e.preventDefault();
+      saveScore(e.target.getAttribute('data-match'));
+    }
     if (e.key === 'Escape') closeModal();
   });
 

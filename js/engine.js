@@ -409,6 +409,38 @@
   }
 
   /*
+   * Take back the last score saved, for the moment the host sees it went
+   * on the wrong court. The game goes back in progress with no score, and
+   * the games its finish started (`startedIds`) are withdrawn - but only
+   * while every one of them is still unscored and nobody from the game
+   * has been put on another court since; otherwise the score stands and
+   * the numbers are for Edit. Returns ok, or the reason, plus the game
+   * and how many games were withdrawn.
+   */
+  function undoScore(session, gameId, startedIds) {
+    var game = null;
+    (session.games || []).forEach(function (g) { if (g.id === gameId) game = g; });
+    if (!game || !game.done) return { ok: false, error: 'That score is no longer there to take back.' };
+    var started = (session.games || []).filter(function (g) { return startedIds.indexOf(g.id) >= 0; });
+    if (started.some(function (g) { return g.done; })) {
+      return { ok: false, error: 'A game that followed has been scored, so this one stands. Use Edit to change the numbers.' };
+    }
+    var four = game.teamA.concat(game.teamB);
+    var clash = activeGames(session).some(function (g) {
+      return startedIds.indexOf(g.id) < 0 && g.teamA.concat(g.teamB).some(function (id) { return four.indexOf(id) >= 0; });
+    });
+    if (clash) {
+      return { ok: false, error: 'Someone from that game is already on another court, so it stands. Use Edit to change the numbers.' };
+    }
+    session.games = session.games.filter(function (g) { return startedIds.indexOf(g.id) < 0; });
+    game.scoreA = null;
+    game.scoreB = null;
+    game.done = false;
+    game.finishedAt = null;
+    return { ok: true, error: null, game: game, withdrawn: started.length };
+  }
+
+  /*
    * Set the session's player list. Newcomers are credited with the lightest
    * current load (used only to break ties among equal waits) and their wait
    * is clocked from now, so they join the back of the line. Rejoining
@@ -923,6 +955,18 @@
     return deltas;
   }
 
+  /* Take rating deltas back for a score that should not have been saved:
+     the rating, and the history point it left. */
+  function undoDeltas(deltas, playersById) {
+    Object.keys(deltas).forEach(function (id) {
+      var p = playersById[id];
+      if (!p) return;
+      var h = p.ratingHistory || [];
+      if (h.length && h[h.length - 1].r === p.rating) h.pop();
+      p.rating -= deltas[id];
+    });
+  }
+
   /* Apply (or revert, with sign -1) rating deltas to players. */
   function applyDeltas(deltas, playersById, sign) {
     Object.keys(deltas).forEach(function (id) {
@@ -1047,13 +1091,14 @@
 
   /*
    * The night in numbers: the scored games, and over those with a clock
-   * the average and the longest; plus the closest and the biggest result.
+   * the average and the longest; the closest and the biggest result; and
+   * the climber of the night, whose rating rose most over the session.
    * Each game field is the game itself, or null when there is none.
    */
   function sessionSummary(session) {
     var done = sessionMatches(session).filter(function (m) { return m.done; });
-    var out = { games: done.length, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null };
-    var total = 0;
+    var out = { games: done.length, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null, climber: null };
+    var total = 0, gains = {};
     done.forEach(function (m) {
       var d = gameDuration(m);
       if (d !== null) {
@@ -1064,9 +1109,33 @@
       var margin = Math.abs(m.scoreA - m.scoreB);
       if (!out.closest || margin < Math.abs(out.closest.scoreA - out.closest.scoreB)) out.closest = m;
       if (!out.biggest || margin > Math.abs(out.biggest.scoreA - out.biggest.scoreB)) out.biggest = m;
+      Object.keys(m.ratingDeltas || {}).forEach(function (id) { gains[id] = (gains[id] || 0) + m.ratingDeltas[id]; });
     });
     if (out.timed) out.avg = Math.round(total / out.timed);
+    // Ties go to the first id, so the answer is the same every time.
+    Object.keys(gains).sort().forEach(function (id) {
+      if (gains[id] > 0 && (!out.climber || gains[id] > out.climber.change)) out.climber = { id: id, change: gains[id] };
+    });
     return out;
+  }
+
+  /*
+   * A player's form: their last `n` results, oldest first, 'W' or 'L'.
+   * Sessions in order, and within one by finish time, then sequence.
+   */
+  function playerForm(playerId, sessions, n) {
+    var results = [];
+    sessions.forEach(function (session) {
+      var mine = sessionMatches(session).filter(function (m) {
+        return m.done && (m.teamA.indexOf(playerId) >= 0 || m.teamB.indexOf(playerId) >= 0);
+      });
+      mine.sort(function (a, b) { return ((a.finishedAt || 0) - (b.finishedAt || 0)) || ((a.seq || 0) - (b.seq || 0)); });
+      mine.forEach(function (m) {
+        var onA = m.teamA.indexOf(playerId) >= 0;
+        results.push((onA ? m.scoreA > m.scoreB : m.scoreB > m.scoreA) ? 'W' : 'L');
+      });
+    });
+    return results.slice(-n);
   }
 
   /*
@@ -1121,6 +1190,8 @@
       plural(session.courtCount || 0, 'court'));
     if (sum.timed) lines.push('Average game ' + fmtDuration(sum.avg) + '; longest ' + fmtDuration(sum.longestMs) + ': ' + result(sum.longest));
     if (sum.closest) lines.push('Closest game: ' + result(sum.closest));
+    if (sum.biggest && sum.biggest !== sum.closest) lines.push('Biggest win: ' + result(sum.biggest));
+    if (sum.climber) lines.push('Climber of the night: ' + name(sum.climber.id) + ' (+' + sum.climber.change + ')');
 
     var stats = computeStats([session]);
     function board(title, ids) {
@@ -1304,6 +1375,9 @@
     waitSince: waitSince,
     waitBands: waitBands,
     completeGame: completeGame,
+    undoScore: undoScore,
+    undoDeltas: undoDeltas,
+    playerForm: playerForm,
     setSessionPlayers: setSessionPlayers,
     fixedPairs: fixedPairs,
     setPair: setPair,

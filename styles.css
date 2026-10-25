@@ -433,3 +433,21 @@ table.prog th:first-child, table.prog td:first-child { text-align: left; }
 .comp-row:last-child { border-bottom: none; }
 .comp-name { font-weight: 600; }
 @media (max-width: 420px) { .comp-grid { grid-template-columns: 1fr; } }
+
+/* ---------- Round 3: form, backup note, period filter ---------- */
+.night-numbers { padding-left: 18px; }
+.night-numbers li { margin: 2px 0; }
+.form-line { margin: 0 0 6px; }
+.form-w, .form-l {
+  display: inline-block; min-width: 22px; text-align: center; font-weight: 800; font-size: .8rem;
+  border-radius: 6px; padding: 1px 4px; color: #fff;
+}
+.form-w { background: var(--win); }
+.form-l { background: #9ca3af; }
+.backup-note.warn { color: var(--danger); font-weight: 600; }
+.period-picker { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 10px; }
+.period-opt {
+  min-height: 36px; padding: 4px 12px; font-size: .85rem; font-weight: 700;
+  border-radius: 999px; border: 1px solid var(--line); background: #fff; color: var(--muted); cursor: pointer;
+}
+.period-opt.selected { background: var(--green); border-color: var(--green); color: #fff; }

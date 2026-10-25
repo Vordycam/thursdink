@@ -1805,3 +1805,22 @@ test('levelDrift: steps from the listed level, signed; null off the scale', () =
   assert.deepEqual(Engine.levelDrift({ skill: '2.0', rating: 940 }), { suggested: '2.0', steps: 0 });
   assert.equal(Engine.levelDrift({ skill: 'x', rating: 1250 }), null);
 });
+
+/* ── names pasted one per line ────────────────────────────────────────── */
+
+test('parseRoster: one name per line, an optional level at the end, duplicates and blanks dropped', () => {
+  const text = 'Ann 3.5\r\nBob\n\n  Cat , 4.0 \nDan-Marie 2.5\nbob\nEve 9.9\n3.5\n   Fay   Gold   5.0\n' + 'X'.repeat(40);
+  assert.deepEqual(Engine.parseRoster(text, '3.0'), [
+    { name: 'Ann', skill: '3.5' },
+    { name: 'Bob', skill: '3.0' },
+    { name: 'Cat', skill: '4.0' },
+    { name: 'Dan-Marie', skill: '2.5' },
+    { name: 'Eve 9.9', skill: '3.0' },
+    { name: '3.5', skill: '3.0' },
+    { name: 'Fay Gold', skill: '5.0' },
+    { name: 'X'.repeat(30), skill: '3.0' },
+  ]);
+  assert.deepEqual(Engine.parseRoster('', '3.5'), []);
+  assert.deepEqual(Engine.parseRoster(null, '3.5'), []);
+  assert.deepEqual(Engine.parseRoster('  \n \n', '3.5'), []);
+});

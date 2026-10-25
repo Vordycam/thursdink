@@ -213,6 +213,30 @@
     return SKILL_RATINGS[skill] || 1250;
   }
 
+  /*
+   * Names pasted one per line, for adding a whole group at once. A line
+   * may end with a level ("Ann 3.5" or "Ann, 3.5"); otherwise the default
+   * applies. Blank lines are skipped, names are trimmed, spaced singly
+   * and cut to 30 characters, and a name repeated in the text is kept
+   * once, whatever its case.
+   */
+  function parseRoster(text, defaultSkill) {
+    var out = [], seen = {};
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var s = line.trim();
+      if (!s) return;
+      var skill = defaultSkill;
+      var m = s.match(/^(.*?)[\s,;:-]+(\d\.\d)$/);
+      if (m && SKILL_LEVELS.indexOf(m[2]) >= 0 && m[1].trim()) { s = m[1].trim(); skill = m[2]; }
+      s = s.replace(/\s+/g, ' ').slice(0, 30);
+      var key = s.toLowerCase();
+      if (seen[key]) return;
+      seen[key] = true;
+      out.push({ name: s, skill: skill });
+    });
+    return out;
+  }
+
   /* The level whose starting rating is nearest to `rating`; a tie goes to
      the lower level. */
   function suggestedSkill(rating) {
@@ -1390,6 +1414,7 @@
     initialRating: initialRating,
     suggestedSkill: suggestedSkill,
     levelDrift: levelDrift,
+    parseRoster: parseRoster,
     sessionMatches: sessionMatches,
     activeGames: activeGames,
     waitingPool: waitingPool,

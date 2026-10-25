@@ -1286,7 +1286,8 @@
       '<select id="new-player-skill" title="Skill level">' + skillOpts + '</select>' +
       '<button class="btn primary" data-action="add-player">Add</button>' +
       '</div><p class="muted small-note">Skill sets the starting rating; it adjusts automatically from results. ' +
-      'Levels: ' + categoriesLine() + '.</p></div>' +
+      'Levels: ' + categoriesLine() + '.</p>' +
+      '<div class="setup-actions"><button class="btn small" data-action="add-several">Add several at once</button></div></div>' +
       '<div class="card"><h2>Roster (' + roster.length + ')</h2>' + rosterFilterHtml(roster.length) +
       (rows || '<p class="muted">No players yet.</p>') + archivedHtml + '</div>';
   }
@@ -1467,6 +1468,7 @@
       '<div><h2>' + esc(p.name) + '</h2>' +
       '<p class="muted">Skill ' + skillText(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong>' +
       (prog.rows.length ? ' (' + signed(change) + ' since their first game)' : '') + '</p></div></div>' +
+      (p.note ? '<p class="player-note">' + esc(p.note) + '</p>' : '') +
       levelHintHtml(p) +
       sparkline(p.ratingHistory) +
       '<div class="stat-grid">' +
@@ -1563,9 +1565,37 @@
       (board || '<p class="muted">No scored games in this session.</p>') +
       (sess.status === 'done' ? pastGamesHtml(sess, byId) : '') +
       '<div class="modal-actions">' +
-      (board ? '<button class="btn" data-action="share-results" data-session="' + sess.id + '">Share results</button><span class="spacer"></span>' : '') +
+      (canReopen(sess) ? '<button class="btn" data-action="reopen-session" data-session="' + sess.id + '">Reopen</button>' : '') +
+      (board ? '<button class="btn" data-action="share-results" data-session="' + sess.id + '">Share results</button>' : '') +
+      (board || canReopen(sess) ? '<span class="spacer"></span>' : '') +
       '<button class="btn" data-action="close-modal">Close</button></div>'
     );
+  }
+
+  /* A session ended by mistake can be reopened for two hours, while nothing
+     else is running: it goes back on its tab and the free courts fill
+     again from the waiting line. */
+  var REOPEN_WINDOW_MS = 2 * 60 * 60000;
+
+  function canReopen(sess) {
+    return sess.status === 'done' && !activeSession() && !!sess.endedAt && Date.now() - sess.endedAt < REOPEN_WINDOW_MS;
+  }
+
+  function reopenSession(sessionId) {
+    var sess = findSession(sessionId);
+    if (!sess || !canReopen(sess)) { toast('This session can no longer be reopened.'); return; }
+    var what = sess.tournament ? 'tournament' : 'session';
+    if (!confirm('Reopen this ' + what + '? Free courts fill again from the waiting line, and it is back on the ' +
+      (sess.tournament ? 'Tournament' : 'Play') + ' tab until you end it again.')) return;
+    sess.status = 'active';
+    sess.endedAt = null;
+    var started = Engine.fillCourts(sess, playersById());
+    persist();
+    closeModal();
+    renderPlay();
+    renderStats();
+    setTab(sess.tournament ? 'tournament' : 'play');
+    toast('Reopened.' + (started.length ? ' Court ' + started.map(function (g) { return g.court; }).join(' & ') + ': next game is up!' : ''));
   }
 
   function findSession(sessionId) {
@@ -1657,6 +1687,9 @@
       '<input type="text" id="edit-player-name" value="' + esc(p.name) + '" maxlength="30"></div>' +
       '<div class="field"><label>Skill level</label>' +
       '<select id="edit-player-skill">' + skillOpts + '</select></div>' +
+      '<div class="field"><label>Notes <span class="muted">(optional)</span></label>' +
+      '<textarea id="edit-player-note" rows="2" maxlength="200" placeholder="Anything worth remembering: back from injury, prefers the far court...">' +
+      esc(p.note || '') + '</textarea></div>' +
       '<div class="field"><label>Photo</label>' +
       '<div class="photo-edit"><span id="edit-photo-preview">' + avatarHtml(p, 'big') + '</span>' +
       '<input type="file" id="edit-player-photo" accept="image/*" hidden>' +
@@ -1936,6 +1969,53 @@
     toast(name + ' added.');
     var el = document.getElementById('new-player-name');
     if (el) { el.value = ''; el.focus(); }
+  }
+
+  /* A whole group at once - a company's list pasted in, one name per line,
+     each with its own level or the one chosen for the rest. Names already
+     on the roster are skipped and named. */
+  function showAddSeveral() {
+    openModal(
+      '<h2>Add several players</h2>' +
+      '<p class="muted small-note">One name per line. Put a level after a name to set it, like "Ann 3.5"; ' +
+      'everyone else gets the level chosen below.</p>' +
+      '<div class="field"><label>Names</label>' +
+      '<textarea id="bulk-names" rows="8" placeholder="Ann 3.5&#10;Bob&#10;Cat, 4.0"></textarea></div>' +
+      '<div class="field"><label>Level for the rest</label><select id="bulk-skill">' + skillOptions('3.5') + '</select></div>' +
+      '<div class="modal-actions"><button class="btn" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary" data-action="add-several-save">Add</button></div>'
+    );
+    var ta = document.getElementById('bulk-names');
+    if (ta) ta.focus();
+  }
+
+  function addSeveral() {
+    var text = document.getElementById('bulk-names').value;
+    var skill = document.getElementById('bulk-skill').value;
+    var rows = Engine.parseRoster(text, skill);
+    if (!rows.length) { toast('Type at least one name.'); return; }
+    var taken = {};
+    DB.players.forEach(function (p) { if (!p.archived) taken[p.name.toLowerCase()] = true; });
+    var added = [], skipped = [];
+    rows.forEach(function (r) {
+      if (taken[r.name.toLowerCase()]) { skipped.push(r.name); return; }
+      DB.players.push({
+        id: Storage_.newId(),
+        name: r.name,
+        skill: r.skill,
+        rating: Engine.initialRating(r.skill),
+        ratingHistory: [],
+        archived: false,
+        createdAt: Date.now()
+      });
+      taken[r.name.toLowerCase()] = true;
+      added.push(r.name);
+    });
+    persist();
+    closeModal();
+    renderAll();
+    toast((added.length ? added.length + (added.length === 1 ? ' player' : ' players') + ' added.' : 'Nobody added.') +
+      (skipped.length ? ' Already on the roster: ' + skipped.join(', ') + '.' : ''));
   }
 
   function startSession() {
@@ -2311,7 +2391,14 @@
     var name = document.getElementById('edit-player-name').value.trim();
     var skill = document.getElementById('edit-player-skill').value;
     if (!name) { toast('Name cannot be empty.'); return; }
+    var taken = DB.players.some(function (o) {
+      return o.id !== p.id && !o.archived && o.name.toLowerCase() === name.toLowerCase();
+    });
+    if (taken) { toast('There is already a player named ' + name + '.'); return; }
     p.name = name;
+    var noteEl = document.getElementById('edit-player-note');
+    var note = noteEl ? noteEl.value.trim().slice(0, 200) : (p.note || '');
+    if (note) p.note = note; else delete p.note;
     var hadGames = (Engine.computeStats(DB.sessions)[playerId] || { games: 0 }).games > 0;
     var moved = '';
     if (skill !== p.skill) {
@@ -2555,6 +2642,9 @@
       case 'toggle-mixed-pairs': toggleMixedPairs(); break;
       case 'end-session': endSession(); break;
       case 'add-player': addPlayer(); break;
+      case 'add-several': showAddSeveral(); break;
+      case 'add-several-save': addSeveral(); break;
+      case 'reopen-session': reopenSession(t.getAttribute('data-session')); break;
       case 'edit-player': e.stopPropagation(); showEditPlayer(t.getAttribute('data-player')); break;
       case 'save-player': savePlayer(t.getAttribute('data-player')); break;
       case 'pick-photo': pickPhoto(); break;

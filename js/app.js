@@ -1274,12 +1274,30 @@
       '<div class="stat-box"><div class="stat-num">' + pct + '%</div><div class="stat-lbl">Win rate</div></div>' +
       '<div class="stat-box"><div class="stat-num">' + ((s.pf - s.pa) > 0 ? '+' : '') + (s.pf - s.pa) + '</div><div class="stat-lbl">Point diff</div></div>' +
       '</div>' +
+      companionsHtml(playerId, byId) +
       (sessionsHtml ? '<h3>Progression by session</h3>' + sessionsHtml : '') +
       '<div class="modal-actions">' +
       '<button class="btn" data-action="edit-player" data-player="' + p.id + '">Edit</button>' +
       '<span class="spacer"></span>' +
       '<button class="btn" data-action="close-modal">Close</button></div>'
     );
+  }
+
+  /* Who a player plays with and against most, with the record from their
+     side. Nothing until they have finished a game. */
+  function companionsHtml(playerId, byId) {
+    var comp = Engine.playerCompanions(playerId, DB.sessions);
+    if (!comp.partners.length && !comp.opponents.length) return '';
+    var row = function (c) {
+      return '<div class="comp-row"><span class="comp-name">' + esc(byId[c.id] ? byId[c.id].name : '?') + '</span>' +
+        '<span class="muted">' + c.wins + '&ndash;' + c.losses + ' in ' + c.games + (c.games === 1 ? ' game' : ' games') + '</span></div>';
+    };
+    var col = function (label, list) {
+      return list.length ? '<div><div class="comp-label">' + label + '</div>' + list.slice(0, 3).map(row).join('') + '</div>' : '';
+    };
+    return '<section class="companions"><h3>Partners &amp; opponents</h3><div class="comp-grid">' +
+      col('Played most with', comp.partners) + col('Played most against', comp.opponents) +
+      '</div></section>';
   }
 
   function showSessionDetail(sessionId) {
@@ -1309,6 +1327,7 @@
       '<h2>' + (sess.tournament ? 'Tournament &middot; ' : '') + fmtDate(sess.startedAt) + '</h2>' +
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
+      nightNumbersHtml(sess, byId) +
       (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
       (sess.matchBySkill ? '<p class="muted small-note">Courts were matched by skill level.</p>' : '') +
       (groups ? '<p class="muted small-note">Two groups: every game was two from ' + esc(Engine.groupLabel(sess, 0)) +
@@ -1317,8 +1336,84 @@
         (sess.mixedPairs ? ' Partners of different levels were allowed; such a pair played in the higher partner\'s division.' : '') +
         '</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
-      '<div class="modal-actions"><button class="btn" data-action="close-modal">Close</button></div>'
+      '<div class="modal-actions">' +
+      (board ? '<button class="btn" data-action="share-results" data-session="' + sess.id + '">Share results</button><span class="spacer"></span>' : '') +
+      '<button class="btn" data-action="close-modal">Close</button></div>'
     );
+  }
+
+  function findSession(sessionId) {
+    for (var i = 0; i < DB.sessions.length; i++) {
+      if (DB.sessions[i].id === sessionId) return DB.sessions[i];
+    }
+    return null;
+  }
+
+  /* "Ann & Ben 11–7 Cat & Dee", plain names. */
+  function resultLine(m, byId) {
+    var team = function (ids) { return esc(ids.map(function (id) { return byId[id] ? byId[id].name : '?'; }).join(' & ')); };
+    return team(m.teamA) + ' ' + m.scoreA + '&ndash;' + m.scoreB + ' ' + team(m.teamB);
+  }
+
+  /* The night in numbers, under a session's heading: the average and
+     longest game from the clocks, and the closest result. Nothing until a
+     game has been scored. */
+  function nightNumbersHtml(sess, byId) {
+    var sum = Engine.sessionSummary(sess);
+    if (!sum.games) return '';
+    var bits = [];
+    if (sum.timed) {
+      bits.push('Average game ' + Engine.fmtDuration(sum.avg));
+      bits.push('Longest ' + Engine.fmtDuration(sum.longestMs) + ': ' + resultLine(sum.longest, byId));
+    }
+    if (sum.closest) bits.push('Closest: ' + resultLine(sum.closest, byId));
+    return '<p class="muted small-note night-numbers">' + bits.join(' &middot; ') + '</p>';
+  }
+
+  /* The recap as text: handed to the phone's share sheet when there is
+     one, otherwise copied to the clipboard, otherwise shown to copy. The
+     share sheet must be opened from the tap itself, so this runs straight
+     from the click handler. */
+  function shareResults(sessionId) {
+    var sess = findSession(sessionId);
+    if (!sess) return;
+    var text = Engine.sessionRecap(sess, playersById(), fmtDate(sess.startedAt));
+    var nav = window.navigator;
+    if (nav.share) {
+      nav.share({ title: 'ThursDink results', text: text }).then(function () { toast('Shared.'); }, function (err) {
+        if (!err || err.name !== 'AbortError') showRecapText(text);   // cancelled: nothing to do
+      });
+      return;
+    }
+    if (nav.clipboard && nav.clipboard.writeText) {
+      nav.clipboard.writeText(text).then(function () { toast('Results copied. Paste them into the group chat.'); },
+        function () { showRecapText(text); });
+      return;
+    }
+    showRecapText(text);
+  }
+
+  function showRecapText(text) {
+    openModal(
+      '<h2>Results</h2>' +
+      '<p class="muted small-note">Copy the text below and paste it into the group chat.</p>' +
+      '<textarea class="recap-text" readonly rows="14">' + esc(text) + '</textarea>' +
+      '<div class="modal-actions">' +
+      '<button class="btn" data-action="copy-recap">Copy</button><span class="spacer"></span>' +
+      '<button class="btn" data-action="close-modal">Close</button></div>'
+    );
+    var ta = document.querySelector('.recap-text');
+    if (ta) { ta.focus(); ta.select(); }
+  }
+
+  function copyRecap() {
+    var ta = document.querySelector('.recap-text');
+    if (!ta) return;
+    ta.focus();
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand && document.execCommand('copy'); } catch (e) { ok = false; }
+    toast(ok ? 'Copied.' : 'Select the text and copy it.');
   }
 
   function showEditPlayer(playerId) {
@@ -1936,6 +2031,7 @@
     session.status = 'done';
     session.endedAt = Date.now();
     persist();
+    releaseScreen();
     renderPlay();
     renderStats();
     showSessionDetail(session.id);
@@ -2205,6 +2301,14 @@
       }
       case 'player-detail': showPlayerDetail(t.getAttribute('data-player')); break;
       case 'session-detail': showSessionDetail(t.getAttribute('data-session')); break;
+      case 'share-results': shareResults(t.getAttribute('data-session')); break;
+      case 'copy-recap': copyRecap(); break;
+      case 'reload-app': window.location.reload(); break;
+      case 'dismiss-update': {
+        var bar = document.getElementById('update-bar');
+        if (bar) bar.hidden = true;
+        break;
+      }
       case 'export-pdf': PdfReport.download(DB); toast('PDF report downloaded.'); break;
       case 'export-data': Storage_.exportJson(DB); toast('Backup file downloaded.'); break;
       case 'import-data': importData(); break;
@@ -2285,12 +2389,17 @@
     return Math.floor(ms / 1000) + 's';
   }
 
+  /* A game to 11 rarely needs twenty minutes; past that the clock turns
+     red so the host can glance over. */
+  var LONG_GAME_MS = 20 * 60000;
+
   /* The clock on a court card: how long the game has been on. Nothing for
      a game that started before clocks existed. */
   function gameClockHtml(m) {
     if (!m.startedAt) return '';
-    return ' <span class="game-time" data-started="' + m.startedAt + '" title="Time on court">\u23F1 ' +
-      fmtClock(Date.now() - m.startedAt) + '</span>';
+    var elapsed = Date.now() - m.startedAt;
+    return ' <span class="game-time' + (elapsed >= LONG_GAME_MS ? ' long' : '') + '" data-started="' + m.startedAt +
+      '" title="Time on court">\u23F1 ' + fmtClock(elapsed) + '</span>';
   }
 
   /* The game clocks tick every second; only their text changes, so a score
@@ -2298,10 +2407,43 @@
   function tickGameTimers() {
     var now = Date.now();
     document.querySelectorAll('.game-time[data-started]').forEach(function (el) {
-      el.textContent = '\u23F1 ' + fmtClock(now - parseInt(el.getAttribute('data-started'), 10));
+      var elapsed = now - parseInt(el.getAttribute('data-started'), 10);
+      el.textContent = '\u23F1 ' + fmtClock(elapsed);
+      el.classList.toggle('long', elapsed >= LONG_GAME_MS);
     });
   }
   setInterval(tickGameTimers, 1000);
+
+  /* ---------- Keep the screen on ---------- */
+
+  /* While a session or tournament runs, the phone on the bench should not
+     go dark between scores. Browsers grant a wake lock only from a tap, so
+     it is asked for on the first tap of a running session and again when
+     the tab comes back; it is released when the session ends. A browser
+     without the feature, or one that refuses, simply behaves as before. */
+  var wakeLock = null;
+
+  function holdScreen() {
+    if (wakeLock || !activeSession()) return;
+    var nav = window.navigator;
+    if (!nav.wakeLock || !nav.wakeLock.request || document.visibilityState !== 'visible') return;
+    nav.wakeLock.request('screen').then(function (lock) {
+      wakeLock = lock;
+      lock.addEventListener('release', function () { wakeLock = null; });
+    }, function () { /* refused (low battery, a setting): nothing to do */ });
+  }
+
+  function releaseScreen() {
+    if (!wakeLock) return;
+    var lock = wakeLock;
+    wakeLock = null;
+    try { lock.release().catch(function () {}); } catch (e) { /* already gone */ }
+  }
+
+  document.addEventListener('click', holdScreen);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') holdScreen();
+  });
 
   function renderAll() {
     renderPlay();

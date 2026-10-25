@@ -1045,6 +1045,114 @@
     return sec + 's';
   }
 
+  /*
+   * The night in numbers: the scored games, and over those with a clock
+   * the average and the longest; plus the closest and the biggest result.
+   * Each game field is the game itself, or null when there is none.
+   */
+  function sessionSummary(session) {
+    var done = sessionMatches(session).filter(function (m) { return m.done; });
+    var out = { games: done.length, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null };
+    var total = 0;
+    done.forEach(function (m) {
+      var d = gameDuration(m);
+      if (d !== null) {
+        out.timed++;
+        total += d;
+        if (out.longestMs === null || d > out.longestMs) { out.longestMs = d; out.longest = m; }
+      }
+      var margin = Math.abs(m.scoreA - m.scoreB);
+      if (!out.closest || margin < Math.abs(out.closest.scoreA - out.closest.scoreB)) out.closest = m;
+      if (!out.biggest || margin > Math.abs(out.biggest.scoreA - out.biggest.scoreB)) out.biggest = m;
+    });
+    if (out.timed) out.avg = Math.round(total / out.timed);
+    return out;
+  }
+
+  /*
+   * Who a player has shared a court with over the given sessions: every
+   * partner and every opponent, with the games and the record from the
+   * player's side. Most games first, then most wins, then by id, so the
+   * order is stable between renders.
+   */
+  function playerCompanions(playerId, sessions) {
+    var partners = {}, opponents = {};
+    function tally(map, id, won) {
+      var t = map[id] || (map[id] = { id: id, games: 0, wins: 0, losses: 0 });
+      t.games++;
+      if (won) t.wins++; else t.losses++;
+    }
+    sessions.forEach(function (session) {
+      sessionMatches(session).forEach(function (m) {
+        if (!m.done) return;
+        var onA = m.teamA.indexOf(playerId) >= 0, onB = m.teamB.indexOf(playerId) >= 0;
+        if (!onA && !onB) return;
+        var mine = onA ? m.teamA : m.teamB, theirs = onA ? m.teamB : m.teamA;
+        var won = onA ? m.scoreA > m.scoreB : m.scoreB > m.scoreA;
+        mine.forEach(function (id) { if (id !== playerId) tally(partners, id, won); });
+        theirs.forEach(function (id) { tally(opponents, id, won); });
+      });
+    });
+    function sorted(map) {
+      return Object.keys(map).map(function (id) { return map[id]; }).sort(function (a, b) {
+        if (b.games !== a.games) return b.games - a.games;
+        if (b.wins !== a.wins) return b.wins - a.wins;
+        return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+      });
+    }
+    return { partners: sorted(partners), opponents: sorted(opponents) };
+  }
+
+  /*
+   * A plain-text recap of a session for the group chat: the night in
+   * numbers and the standings exactly as the app ranks them - one board,
+   * or one per division, or the group score and one per group. `dateText`
+   * is the date as the caller formats it. Plain characters only, apart
+   * from names, so it pastes anywhere.
+   */
+  function sessionRecap(session, playersById, dateText) {
+    var name = function (id) { return playersById[id] ? playersById[id].name : '?'; };
+    var team = function (ids) { return ids.map(name).join(' & '); };
+    var result = function (m) { return team(m.teamA) + ' ' + m.scoreA + '-' + m.scoreB + ' ' + team(m.teamB); };
+    var plural = function (n, word) { return n + ' ' + word + (n === 1 ? '' : 's'); };
+    var sum = sessionSummary(session);
+    var lines = ['ThursDink - ' + dateText + (session.tournament ? ' - tournament' : '')];
+    lines.push(plural(sessionParticipants(session).length, 'player') + ', ' + plural(sum.games, 'game') + ', ' +
+      plural(session.courtCount || 0, 'court'));
+    if (sum.timed) lines.push('Average game ' + fmtDuration(sum.avg) + '; longest ' + fmtDuration(sum.longestMs) + ': ' + result(sum.longest));
+    if (sum.closest) lines.push('Closest game: ' + result(sum.closest));
+
+    var stats = computeStats([session]);
+    function board(title, ids) {
+      var b = rankStandings(stats, playersById, ids);
+      if (!b.ranked.length && !b.mentions.length) return;
+      lines.push('', title);
+      b.ranked.forEach(function (r) {
+        lines.push(r.rank + '. ' + r.name + ' ' + r.wins + '-' + r.losses + ' (' + Math.round(r.pct * 100) + '%, ' +
+          (r.diff > 0 ? '+' : '') + r.diff + ')');
+      });
+      if (b.mentions.length) {
+        lines.push('Special mentions: ' + b.mentions.map(function (r) {
+          return r.name + ' ' + r.wins + '-' + r.losses + ' in ' + plural(r.games, 'game');
+        }).join(', '));
+      }
+    }
+    if (groupPlay(session)) {
+      var score = groupScore(session);
+      lines.push('', groupLabel(session, 0) + ' ' + score.wins[0] + ' - ' + score.wins[1] + ' ' + groupLabel(session, 1) +
+        ' (games won; points ' + score.points[0] + '-' + score.points[1] + ')');
+      tournamentGroups(session).forEach(function (g) { board(g.label, g.ids); });
+    } else if (tournament(session)) {
+      tournamentDivisions(session, playersById).forEach(function (d) { board(d.label, d.ids); });
+    } else {
+      board('Standings', null);
+    }
+    if ((session.pairs || []).length) {
+      lines.push('', 'Fixed partners: ' + session.pairs.map(function (p) { return name(p[0]) + ' & ' + name(p[1]); }).join(', '));
+    }
+    return lines.join('\n');
+  }
+
   /* Everyone who was part of a session: still checked in, or finished a game
      before leaving. Used for the "N players" figure and the standings. */
   function sessionParticipants(session) {
@@ -1230,6 +1338,9 @@
     gameDuration: gameDuration,
     playTimes: playTimes,
     fmtDuration: fmtDuration,
+    sessionSummary: sessionSummary,
+    playerCompanions: playerCompanions,
+    sessionRecap: sessionRecap,
     skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,

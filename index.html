@@ -37,6 +37,11 @@
 
   <div id="modal-root"></div>
   <div id="toast" class="toast" hidden></div>
+  <div id="update-bar" class="update-bar" hidden>
+    <span>A new version of ThursDink is ready.</span>
+    <button class="btn small primary" data-action="reload-app">Reload</button>
+    <button class="btn small" data-action="dismiss-update">Later</button>
+  </div>
 
   <script src="js/storage.js"></script>
   <script src="js/engine.js"></script>
@@ -45,6 +50,15 @@
   <script>
     if ('serviceWorker' in navigator && location.protocol !== 'file:') {
       window.addEventListener('load', function () {
+        // A page already under a service worker is running the files it
+        // loaded. When a new worker takes over, the next load would bring
+        // the new version; offer that reload instead of waiting for it.
+        var hadController = !!navigator.serviceWorker.controller;
+        navigator.serviceWorker.addEventListener('controllerchange', function () {
+          if (!hadController) return;
+          var bar = document.getElementById('update-bar');
+          if (bar) bar.hidden = false;
+        });
         navigator.serviceWorker.register('sw.js').catch(function (err) {
           console.warn('Service worker registration failed:', err);
         });

@@ -407,3 +407,29 @@ table.prog th:first-child, table.prog td:first-child { text-align: left; }
 }
 /* On a finished result: how long it took. */
 .fin-time { font-size: .8rem; font-weight: 500; }
+
+/* ---------- Update banner ---------- */
+.update-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap;
+  background: var(--ball); color: var(--text); font-weight: 600;
+  padding: 10px 16px max(10px, env(safe-area-inset-bottom));
+  box-shadow: 0 -2px 10px rgba(0,0,0,.15);
+}
+.update-bar[hidden] { display: none; }
+
+/* ---------- Night in numbers, share, partners and opponents ---------- */
+/* A game running past twenty minutes. */
+.game-time.long { color: var(--danger); }
+.night-numbers { margin: 4px 0 10px; line-height: 1.45; }
+.recap-text {
+  width: 100%; font: inherit; font-size: .9rem; line-height: 1.4; padding: 10px;
+  border: 1px solid var(--line); border-radius: 10px; resize: vertical; white-space: pre-wrap; overflow: auto;
+}
+.companions h3 { margin: 14px 0 8px; font-size: 1rem; }
+.comp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: .95rem; }
+.comp-label { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+.comp-row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+.comp-row:last-child { border-bottom: none; }
+.comp-name { font-weight: 600; }
+@media (max-width: 420px) { .comp-grid { grid-template-columns: 1fr; } }

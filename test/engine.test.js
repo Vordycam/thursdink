@@ -1531,3 +1531,113 @@ test('game clocks: standings notes report the average game time when the play ti
     rows.filter((r) => r.rank).map((r) => [r.id, r.note]),
     'same input, same output');
 });
+
+/* ── the night in numbers, partners and opponents, the recap ─────────── */
+
+test('sessionSummary: games, the timed average and longest, the closest and biggest results', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  const sess = session(['A', 'B', 'C', 'D'], 1);
+  assert.deepEqual(Engine.sessionSummary(sess),
+    { games: 0, timed: 0, avg: null, longest: null, longestMs: null, closest: null, biggest: null });
+  const g1 = Engine.fillCourts(sess, byId)[0];
+  advance(10 * MIN);
+  Engine.completeGame(g1, 11, 9);
+  const g2 = Engine.fillCourts(sess, byId)[0];
+  advance(16 * MIN);
+  Engine.completeGame(g2, 2, 11);
+  played(sess, ['A', 'B'], ['C', 'D'], 11, 10);    // recorded without a clock
+  const live = Engine.fillCourts(sess, byId)[0];   // in progress: not counted
+  assert.ok(live && !live.done);
+  const sum = Engine.sessionSummary(sess);
+  assert.equal(sum.games, 3);
+  assert.equal(sum.timed, 2, 'the untimed game is left out of the clock figures');
+  assert.equal(sum.avg, 13 * MIN);
+  assert.equal(sum.longest, g2);
+  assert.equal(sum.longestMs, 16 * MIN);
+  assert.equal(sum.closest.scoreA, 11);
+  assert.equal(sum.closest.scoreB, 10);
+  assert.equal(sum.biggest, g2);
+});
+
+test('playerCompanions: partners and opponents with the record from the player\'s side, most games first', () => {
+  const s1 = session(['A', 'B', 'C', 'D', 'E'], 1);
+  played(s1, ['A', 'B'], ['C', 'D'], 11, 5);       // A with B beat C and D
+  played(s1, ['C', 'A'], ['B', 'E'], 7, 11);       // A with C lost to B and E
+  played(s1, ['D', 'E'], ['A', 'B'], 11, 3);       // A with B lost to D and E
+  s1.games.push({ id: 'live', court: 1, seq: 9, teamA: ['A', 'C'], teamB: ['B', 'D'], scoreA: null, scoreB: null, done: false });
+  const s2 = session(['A', 'B', 'E', 'F'], 1);
+  played(s2, ['B', 'E'], ['A', 'F'], 11, 2);       // A with F lost to B and E
+  const c = Engine.playerCompanions('A', [s1, s2]);
+  assert.deepEqual(c.partners, [
+    { id: 'B', games: 2, wins: 1, losses: 1 },
+    { id: 'C', games: 1, wins: 0, losses: 1 },
+    { id: 'F', games: 1, wins: 0, losses: 1 },
+  ], 'most games first, then most wins, then by id; the game in progress does not count');
+  assert.deepEqual(c.opponents, [
+    { id: 'E', games: 3, wins: 0, losses: 3 },
+    { id: 'D', games: 2, wins: 1, losses: 1 },
+    { id: 'B', games: 2, wins: 0, losses: 2 },
+    { id: 'C', games: 1, wins: 1, losses: 0 },
+  ]);
+  assert.deepEqual(Engine.playerCompanions('Z', [s1, s2]), { partners: [], opponents: [] }, 'never played');
+  assert.deepEqual(Engine.playerCompanions('A', []), { partners: [], opponents: [] });
+});
+
+test('sessionRecap: a plain-text recap with the night in numbers and the standings as ranked', () => {
+  const byId = players(['Ann', 'Bob', 'Cat', 'Dan', 'Eve']);
+  const sess = session(['Ann', 'Bob', 'Cat', 'Dan', 'Eve'], 2);
+  sess.pairs = [['Ann', 'Bob']];
+  sess.games.push({ id: 'r1', court: 1, seq: 1, startedAt: clock, teamA: ['Ann', 'Bob'], teamB: ['Cat', 'Dan'], scoreA: null, scoreB: null, done: false });
+  advance(12 * MIN);
+  Engine.completeGame(sess.games[0], 11, 4);
+  sess.games.push({ id: 'r2', court: 2, seq: 2, startedAt: clock, teamA: ['Eve', 'Cat'], teamB: ['Ann', 'Bob'], scoreA: null, scoreB: null, done: false });
+  advance(18 * MIN);
+  Engine.completeGame(sess.games[1], 10, 11);
+  const text = Engine.sessionRecap(sess, byId, 'Thu, Oct 23, 2026');
+  assert.deepEqual(text.split('\n'), [
+    'ThursDink - Thu, Oct 23, 2026',
+    '5 players, 2 games, 2 courts',
+    'Average game 15m 00s; longest 18m 00s: Eve & Cat 10-11 Ann & Bob',
+    'Closest game: Eve & Cat 10-11 Ann & Bob',
+    '',
+    'Standings',
+    '1. Ann 2-0 (100%, +8)',
+    '2. Bob 2-0 (100%, +8)',
+    '3. Eve 0-1 (0%, -1)',
+    '4. Dan 0-1 (0%, -7)',
+    '5. Cat 0-2 (0%, -8)',
+    '',
+    'Fixed partners: Ann & Bob',
+  ]);
+  assert.ok(/^[\x20-\x7e\n]+$/.test(text), 'plain characters only');
+  assert.equal(Engine.sessionRecap(sess, byId, 'x'), Engine.sessionRecap(sess, byId, 'x'), 'deterministic');
+  const empty = session(['Ann', 'Bob', 'Cat', 'Dan'], 1);
+  assert.deepEqual(Engine.sessionRecap(empty, byId, 'd').split('\n'), ['ThursDink - d', '4 players, 0 games, 1 court'],
+    'nothing scored: just the heading');
+});
+
+test('sessionRecap: a division tournament lists a board per division; two groups lead with the score', () => {
+  const table = { A: '3.0', B: '3.0', C: '3.5', D: '3.5', E: '4.0', F: '4.0', G: '4.5', H: '4.5' };
+  const byId = levelled(table);
+  const t = session(Object.keys(table), 2);
+  t.tournament = true;
+  played(t, ['A', 'B'], ['C', 'D'], 11, 6);
+  t.games[0].category = 'Novice';
+  played(t, ['E', 'F'], ['G', 'H'], 11, 9);
+  t.games[1].category = 'Intermediate';
+  const text = Engine.sessionRecap(t, byId, 'd');
+  assert.match(text, /^ThursDink - d - tournament\n8 players, 2 games, 2 courts\n/);
+  assert.ok(text.indexOf('\nNovice\n1. A 1-0 (100%, +5)\n') > 0, text);
+  assert.ok(text.indexOf('\nIntermediate\n1. E 1-0 (100%, +2)\n') > 0, text);
+  assert.ok(text.indexOf('\nNovice\n') < text.indexOf('\nIntermediate\n'), 'divisions in scale order');
+  assert.ok(text.indexOf('Standings') < 0, 'no single board');
+
+  const { byId: gById, sess: g } = grouped({ A: 0, B: 0, C: 0, K: 1, L: 1, M: 1 }, 1);
+  played(g, ['A', 'B'], ['K', 'L'], 11, 7);
+  played(g, ['A', 'C'], ['K', 'M'], 9, 11);
+  const gt = Engine.sessionRecap(g, gById, 'd');
+  assert.ok(gt.indexOf('\nReds 1 - 1 Blues (games won; points 20-18)\n') > 0, gt);
+  assert.ok(gt.indexOf('\nReds\n1. B 1-0 (100%, +4)\n2. A 1-1 (50%, +2)\n3. C 0-1 (0%, -2)\n') > 0, gt);
+  assert.ok(gt.indexOf('\nBlues\n1. M 1-0 (100%, +2)\n2. K 1-1 (50%, -2)\n3. L 0-1 (0%, -4)') > 0, gt);
+  assert.ok(gt.indexOf('\nReds\n') < gt.indexOf('\nBlues\n'));
+});

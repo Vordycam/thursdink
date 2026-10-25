@@ -709,8 +709,8 @@
    * has four ready. The game is tagged with its division. A two-group
    * tournament instead takes two from each group's line (pickGroupGame).
    */
-  function nextGame(session, playersById) {
-    var ranked = rankUnits(session, playersById, true);
+  function nextGame(session, playersById, randomize) {
+    var ranked = rankUnits(session, playersById, randomize !== false);
     var counts = ranked.counts;
     var units = ranked.units.filter(function (u) { return !u.waitingFor; });
     if (countIds(units) < 4) return null;
@@ -741,6 +741,17 @@
       if (game) { game.category = order[d]; return game; }
     }
     return null;
+  }
+
+  /*
+   * Who would go on if a court opened this moment: the same pick as
+   * fillCourts makes, but with exact ties settled by roster order instead
+   * of by chance, so the answer holds still between redraws. On an exact
+   * tie the real pick may differ; otherwise it is this one. Null when no
+   * court could be filled.
+   */
+  function previewNext(session, playersById) {
+    return nextGame(session, playersById, false);
   }
 
   /* The pick itself, over units already in queue order with four or more
@@ -1433,6 +1444,7 @@
     queueUnits: queueUnits,
     queueOrder: queueOrder,
     fillCourts: fillCourts,
+    previewNext: previewNext,
     checkScore: checkScore,
     migrateSession: migrateSession,
     normalizeSession: normalizeSession,

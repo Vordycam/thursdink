@@ -362,6 +362,21 @@
     return html;
   }
 
+  /* Who would go on if a court opened this moment: the engine's own pick,
+     with ties settled by roster order so the line holds still between
+     redraws. On an exact tie the real pick may differ. Nothing when no
+     court could be filled. */
+  function nextUpHtml(session, byId, fixed, levels) {
+    var next = Engine.previewNext(session, byId);
+    if (!next) return '';
+    var badge = next.category !== undefined ? divisionTag(Engine.divisionLabel(next.category)) : '';
+    var tagA = next.groups ? ' ' + groupTag(session, 0) : '';
+    var tagB = next.groups ? ' ' + groupTag(session, 1) : '';
+    return '<div class="sitouts next-up"><span class="sitout-label">Up next if a court opens:</span>' + badge + ' ' +
+      teamNames(next.teamA, byId, fixed, levels) + tagA + ' <span class="vs-inline">v</span> ' +
+      teamNames(next.teamB, byId, fixed, levels) + tagB + '</div>';
+  }
+
   /* Games still running on courts the host has since closed: they finish,
      and nothing new starts there. */
   function closingCourtsHtml(actives, session, card) {
@@ -485,7 +500,8 @@
 
     var html = '<div class="session-bar">' +
       '<div><strong>Session</strong> &middot; ' + fmtDate(session.startedAt) +
-      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
+      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts &middot; <span class="session-time" data-started="' + session.startedAt + '">' +
+      fmtSession(Date.now() - session.startedAt) + '</span></div>' +
       '<div class="session-bar-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
@@ -503,6 +519,7 @@
     }
     html += closingCourtsHtml(actives, session, function (cg) { return renderActiveGameCard(cg, byId, fixed, skill, null, null, true); });
     html += '</div>';
+    html += nextUpHtml(session, byId, fixed, skill);
 
     if (pool.length) {
       // Longest wait first. Each chip carries its own clock and a colour for
@@ -1002,7 +1019,8 @@
 
     var html = '<div class="session-bar">' +
       '<div><strong>Tournament</strong> &middot; ' + fmtDate(session.startedAt) +
-      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
+      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts &middot; <span class="session-time" data-started="' + session.startedAt + '">' +
+      fmtSession(Date.now() - session.startedAt) + '</span></div>' +
       '<div class="session-bar-actions tour-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
@@ -1032,6 +1050,7 @@
       return renderActiveGameCard(cg, byId, fixed, true, Engine.divisionLabel(gameDivision(cg, byId)), null, true);
     });
     html += '</div>';
+    html += nextUpHtml(session, byId, fixed, true);
 
     divisions.forEach(function (n) {
       var all = lines[n] || [];
@@ -1114,7 +1133,8 @@
 
     var html = '<div class="session-bar">' +
       '<div><strong>Tournament</strong> &middot; ' + fmtDate(session.startedAt) +
-      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts</div>' +
+      ' &middot; ' + session.playerIds.length + ' players &middot; ' + session.courtCount + ' courts &middot; <span class="session-time" data-started="' + session.startedAt + '">' +
+      fmtSession(Date.now() - session.startedAt) + '</span></div>' +
       '<div class="session-bar-actions tour-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
@@ -1137,6 +1157,7 @@
     }
     html += closingCourtsHtml(actives, session, function (cg) { return renderActiveGameCard(cg, byId, fixed, true, null, tags, true); });
     html += '</div>';
+    html += nextUpHtml(session, byId, fixed, true);
 
     [0, 1].forEach(function (gi) {
       var ready = readyOf(gi);
@@ -2687,6 +2708,7 @@
       case 'reset-progress': resetProgress(); break;
       case 'reset-everything': resetEverything(); break;
       case 'close-modal': closeModal(); break;
+      case 'cycle-theme': cycleTheme(); break;
     }
   });
 
@@ -2747,6 +2769,15 @@
       var el = chip.querySelector('.wait-time');
       if (el) el.textContent = fmtWait(now - parseInt(chip.getAttribute('data-since'), 10));
     });
+    document.querySelectorAll('.session-time[data-started]').forEach(function (el) {
+      el.textContent = fmtSession(now - parseInt(el.getAttribute('data-started'), 10));
+    });
+  }
+
+  /* "just started", "12m so far", "1h 05m so far": how long the session has run. */
+  function fmtSession(ms) {
+    if (ms < 60000) return 'just started';
+    return fmtWait(ms) + ' so far';
   }
   setInterval(tickWaitTimers, 15000);
 
@@ -2823,6 +2854,46 @@
     if (document.visibilityState === 'visible') holdScreen();
   });
 
+  /* ---------- Appearance ---------- */
+
+  /* Light, as always, unless this device chooses dark or auto (which
+     follows the phone). The choice is kept on the device; index.html
+     applies it before the first paint so there is no flash. */
+  var THEME_KEY = 'pbr-theme';
+
+  function themeMode() {
+    var m = 'light';
+    try { m = localStorage.getItem(THEME_KEY) || 'light'; } catch (e) { /* storage blocked: light */ }
+    return m === 'dark' || m === 'auto' ? m : 'light';
+  }
+
+  function systemDark() {
+    try { return !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches); } catch (e) { return false; }
+  }
+
+  function applyTheme() {
+    var mode = themeMode();
+    var dark = mode === 'dark' || (mode === 'auto' && systemDark());
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var label = mode === 'auto' ? 'Auto' : mode === 'dark' ? 'Dark' : 'Light';
+    var btn = document.querySelector('[data-action="cycle-theme"]');
+    if (btn) {
+      btn.textContent = label;
+      btn.setAttribute('title', 'Appearance: ' + label + (mode === 'auto' ? ' (follows your phone)' : '') + '. Tap to change.');
+    }
+  }
+
+  function cycleTheme() {
+    var next = { light: 'dark', dark: 'auto', auto: 'light' }[themeMode()];
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* storage blocked: this visit only */ }
+    applyTheme();
+    toast('Appearance: ' + (next === 'auto' ? 'auto, following your phone' : next) + '.');
+  }
+
+  try {
+    if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+  } catch (e) { /* an older browser: auto applies on the next open */ }
+
   function renderAll() {
     renderPlay();
     renderPlayers();
@@ -2830,5 +2901,6 @@
     updateSetupCount();
   }
 
+  applyTheme();
   renderAll();
 })();

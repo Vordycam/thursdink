@@ -13,12 +13,23 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="ThursDink">
   <link rel="stylesheet" href="styles.css">
+  <script>
+    /* The appearance chosen on this device - light unless set otherwise -
+       goes on before the first paint, so a dark page never flashes light. */
+    (function () {
+      var mode = 'light';
+      try { mode = localStorage.getItem('pbr-theme') || 'light'; } catch (e) {}
+      var dark = mode === 'dark' || (mode === 'auto' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    })();
+  </script>
 </head>
 <body>
   <header class="app-header">
     <div class="app-title">
       <img class="logo-img" src="logo.jpg" alt="ThursDink logo">
       <h1>ThursDink <span class="subtitle">Rotation &amp; Progress Tracker</span></h1>
+      <button class="theme-btn" data-action="cycle-theme" title="Appearance. Tap to change.">Light</button>
     </div>
     <nav class="tabs" role="tablist">
       <button class="tab-btn active" data-tab="play" role="tab">Play</button>

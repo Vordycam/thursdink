@@ -1824,3 +1824,65 @@ test('parseRoster: one name per line, an optional level at the end, duplicates a
   assert.deepEqual(Engine.parseRoster(null, '3.5'), []);
   assert.deepEqual(Engine.parseRoster('  \n \n', '3.5'), []);
 });
+
+/* ── who plays next ───────────────────────────────────────────────────── */
+
+test('previewNext: the pick a free court would get, the same on every call, and the real pick when there is no tie', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']);
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'], 1);
+  const g1 = Engine.fillCourts(sess, byId)[0];
+  advance(5 * MIN);
+  Engine.completeGame(g1, 11, 3);
+  const g2 = Engine.fillCourts(sess, byId)[0];          // the six who waited longest: four of them
+  advance(5 * MIN);
+  Engine.completeGame(g2, 11, 3);
+  const g3 = Engine.fillCourts(sess, byId)[0];
+  // g3 took the two left over from the first six plus two of g1's four.
+  // Waiting now: the other two from g1 (longest, since t0+5), then g2's
+  // four (since t0+10). No tie for the next court: those two go on.
+  const leftFromG1 = onCourt(g1).filter((id) => !onCourt(g3).includes(id));
+  assert.equal(leftFromG1.length, 2);
+  const p1 = Engine.previewNext(sess, byId);
+  const p2 = Engine.previewNext(sess, byId);
+  assert.ok(p1 && p2);
+  assert.deepEqual(onCourt(p1), onCourt(p2), 'holds still between calls');
+  assert.deepEqual(p1.teamA, p2.teamA);
+  assert.equal(sess.games.length, 3, 'a preview starts nothing');
+  assert.equal(Engine.activeGames(sess).length, 1);
+  leftFromG1.forEach((id) => assert.ok(onCourt(p1).includes(id), `${id} has waited longest and is in the preview`));
+  advance(5 * MIN);
+  Engine.completeGame(g3, 11, 4);
+  const real = Engine.fillCourts(sess, byId)[0];
+  leftFromG1.forEach((id) => assert.ok(onCourt(real).includes(id), `${id} waited longest and plays`));
+  assert.ok(onCourt(real).every((id) => !onCourt(g3).includes(id)), 'nobody from the game that just ended');
+});
+
+test('previewNext: null when no court could be filled; carries the division or the groups', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+  const sess = session(['A', 'B', 'C', 'D', 'E', 'F', 'G'], 1);
+  Engine.fillCourts(sess, byId);
+  assert.equal(Engine.previewNext(sess, byId), null, 'three waiting: nobody can go on');
+  Engine.setSessionPlayers(sess, ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']);
+  byId.H = { id: 'H', name: 'H', skill: '3.5', rating: 1250 };
+  const p = Engine.previewNext(sess, byId);
+  assert.ok(p, 'four waiting: a preview');
+  assert.equal(p.category, undefined);
+  assert.equal(p.groups, undefined);
+
+  const table = { A: '3.0', B: '3.0', C: '3.5', D: '3.5', E: '4.0', F: '4.0', G: '4.5', H: '4.5' };
+  const tById = levelled(table);
+  const t = session(Object.keys(table), 1);
+  t.tournament = true;
+  Engine.fillCourts(t, tById);
+  const tp = Engine.previewNext(t, tById);
+  assert.ok(tp);
+  assert.ok(tp.category === 'Novice' || tp.category === 'Intermediate', 'tagged with its division');
+  assert.ok(categoriesOf(tp, tById).every((c) => c === tp.category));
+
+  const { byId: gById, sess: g } = grouped({ A: 0, B: 0, C: 0, D: 0, K: 1, L: 1, M: 1, N: 1 }, 1);
+  Engine.fillCourts(g, gById);
+  const gp = Engine.previewNext(g, gById);
+  assert.ok(gp);
+  assert.deepEqual(gp.groups, [0, 1]);
+  assert.deepEqual(groupsOf(gp, g), [[0, 0], [1, 1]]);
+});

@@ -187,7 +187,23 @@
         }
         if (sess.matchBySkill) doc.text(MARGIN, 'Courts were matched by skill level.', 8, false);
         var sessStats = Engine.computeStats([sess]);
-        if (sess.tournament) {
+        var times = Engine.playTimes(sess);   // each note then carries the player's average game time
+        if (Engine.groupPlay(sess)) {
+          // Two groups: the score between them, then a table per group.
+          var score = Engine.groupScore(sess);
+          var names = [Engine.groupLabel(sess, 0), Engine.groupLabel(sess, 1)];
+          doc.text(MARGIN, 'Two groups: every game was two from ' + names[0] + ' against two from ' + names[1] + '.', 8, false);
+          doc.text(MARGIN, names[0] + ' ' + score.wins[0] + ' - ' + score.wins[1] + ' ' + names[1] +
+            '  (games won; points ' + score.points[0] + ' - ' + score.points[1] + ')', 10, true);
+          Engine.tournamentGroups(sess).forEach(function (grp) {
+            var board = Engine.rankStandings(sessStats, byId, grp.ids, times);
+            if (!board.ranked.length && !board.mentions.length) return;
+            doc.ensure(60);
+            doc.space(4);
+            doc.text(MARGIN, grp.label, 11, true);
+            writeStandings(doc, board);
+          });
+        } else if (sess.tournament) {
           // One table per division: nobody played outside their own.
           doc.text(MARGIN, 'Every game was played within one division.', 8, false);
           // Its own line: the writer does not wrap, and together they would run off the page.
@@ -195,7 +211,7 @@
             doc.text(MARGIN, 'Partners of different levels were allowed; such a pair played in the higher partner\'s division.', 8, false);
           }
           Engine.tournamentDivisions(sess, byId).forEach(function (d) {
-            var board = Engine.rankStandings(sessStats, byId, d.ids);
+            var board = Engine.rankStandings(sessStats, byId, d.ids, times);
             if (!board.ranked.length && !board.mentions.length) return;
             doc.ensure(60);
             doc.space(4);
@@ -204,7 +220,7 @@
           });
         } else {
           doc.space(2);
-          writeStandings(doc, Engine.rankStandings(sessStats, byId, null));
+          writeStandings(doc, Engine.rankStandings(sessStats, byId, null, times));
         }
         doc.space(8);
       });

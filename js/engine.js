@@ -9,7 +9,10 @@
    them in rating. A tournament goes further: every game is played within
    one division, the group's skill categories, and divisions never mix. The
    host may allow fixed partners of different levels; such a pair then plays
-   in the higher partner's division. */
+   in the higher partner's division. The other tournament format is two
+   groups: every game is two players from one group against two from the
+   other, and the groups' wins are the score. Every game carries a clock, so
+   a player's average time on court can be reported. */
 (function () {
   'use strict';
 
@@ -115,6 +118,44 @@
    */
   function mixedPairs(session) {
     return !!session.mixedPairs;
+  }
+
+  /*
+   * Two groups is the other tournament format: Group A against Group B,
+   * for a company or club night. Every game is two players from one group
+   * against two from the other, so nobody ever partners or faces their own
+   * group, and the groups' wins are the score. session.groups holds the two
+   * names and each player's group: { names: ['Group A', 'Group B'],
+   * of: { playerId: 0 | 1 } }. Without it a tournament is by division, as
+   * before. Team A on every court is the first group and team B the second,
+   * so a game's score is also a group's score. Within a group the usual
+   * rules apply: longest wait first, then fewest games, with the same
+   * variety and balance in choosing the court.
+   */
+  function groupPlay(session) {
+    return tournament(session) && !!(session.groups && session.groups.of);
+  }
+
+  /* A player's group, 0 or 1, or -1 when they have none. A player who has
+     left keeps theirs, so their results stay with their group. */
+  function playerGroup(session, id) {
+    var g = session.groups && session.groups.of ? session.groups.of[id] : undefined;
+    return g === 0 || g === 1 ? g : -1;
+  }
+
+  function groupLabel(session, g) {
+    var names = (session.groups && session.groups.names) || [];
+    return names[g] || ('Group ' + (g === 1 ? 'B' : 'A'));
+  }
+
+  /* A unit's group: the one its members share, or -1 when a member has
+     none or a fixed pair straddles the two. Such a unit is never seated. */
+  function unitGroup(session, unit) {
+    var g = playerGroup(session, unit.ids[0]);
+    for (var i = 1; i < unit.ids.length; i++) {
+      if (playerGroup(session, unit.ids[i]) !== g) return -1;
+    }
+    return g;
   }
 
   /* The division a player plays in: the category of their declared level.
@@ -258,13 +299,17 @@
   /* Make two checked-in players a pair. Anyone can be in only one pair, so
      an earlier pair involving either of them is replaced. In a tournament,
      given the players, both must be in the same division unless the host
-     allows mixed pairs. */
+     allows mixed pairs; in a two-group tournament, in the same group. */
   function setPair(session, a, b, playersById) {
     if (!a || !b || a === b) return { ok: false, error: 'Pick two different players.' };
     if (session.playerIds.indexOf(a) < 0 || session.playerIds.indexOf(b) < 0) {
       return { ok: false, error: 'Both players must be checked in to this session.' };
     }
-    if (tournament(session) && !mixedPairs(session) && playersById &&
+    if (groupPlay(session)) {
+      if (playerGroup(session, a) !== playerGroup(session, b)) {
+        return { ok: false, error: 'In a group tournament, partners must be in the same group.' };
+      }
+    } else if (tournament(session) && !mixedPairs(session) && playersById &&
         playerCategory(playersById, a) !== playerCategory(playersById, b)) {
       return { ok: false, error: 'In a tournament, partners must be in the same division.' };
     }
@@ -584,7 +629,8 @@
    *
    * A tournament runs the same pick, but over one division at a time: the
    * division of the longest wait first, then the next, until one of them
-   * has four ready. The game is tagged with its division.
+   * has four ready. The game is tagged with its division. A two-group
+   * tournament instead takes two from each group's line (pickGroupGame).
    */
   function nextGame(session, playersById) {
     var ranked = rankUnits(session, playersById, true);
@@ -599,6 +645,7 @@
     }
 
     if (!tournament(session)) return pickNext(units, counts, fixed, skill, ratingOf);
+    if (groupPlay(session)) return pickGroupGame(units, counts, fixed, ratingOf, session);
 
     // The units are already in queue order, so the first seen from each
     // division is that division's claim on the court. A mixed pair, where
@@ -663,6 +710,84 @@
   }
 
   /*
+   * The pick for two groups. Each side comes from its own group's line:
+   * longest wait first, then fewest games, with the same tie window, lock
+   * and look-ahead as a regular court, but for two seats instead of four.
+   * The two sides are then chosen together - the court with the fewest
+   * repeat partners and opponents and the closest team ratings, each unit
+   * passed over on its side costing LEAPFROG_PENALTY as usual. Team A is
+   * always the first group. Null when either group has fewer than two
+   * ready; a court is never filled from one group alone.
+   */
+  function pickGroupGame(units, counts, fixed, ratingOf, session) {
+    var lines = [[], []];
+    units.forEach(function (u) {
+      var g = unitGroup(session, u);
+      if (g >= 0) lines[g].push(u);
+    });
+    if (countIds(lines[0]) < 2 || countIds(lines[1]) < 2) return null;
+    var sidesA = sideOptions(lines[0]), sidesB = sideOptions(lines[1]);
+    var best = null, bestCost = Infinity;
+    sidesA.forEach(function (a) {
+      sidesB.forEach(function (b) {
+        var cost = pairingCost(a.ids, b.ids, counts, ratingOf, fixed) + a.penalty + b.penalty;
+        if (cost < bestCost) { bestCost = cost; best = { teamA: a.ids, teamB: b.ids, groups: [0, 1] }; }
+      });
+    });
+    return best;
+  }
+
+  /* The ways to fill one side of a group court from its line, in queue
+     order: every pick of two that the lock and look-ahead allow, each with
+     the leapfrog cost of the units it passes over. Empty only if the line
+     cannot seat two, which the caller has ruled out. */
+  function sideOptions(units) {
+    var locked = [], tier = [];
+    var pivot = 0, seen = 0;
+    for (var i = 0; i < units.length; i++) {
+      seen += units[i].ids.length;
+      if (seen >= 2) { pivot = units[i].since; break; }
+    }
+    units.forEach(function (u) {
+      if (u.since < pivot - TIE_WINDOW_MS) locked.push(u);
+      else if (u.since <= pivot + TIE_WINDOW_MS) tier.push(u);
+    });
+    for (;;) {
+      tier.sort(byEntitlement);
+      var need = 2 - countIds(locked);
+      var covered = 0, k = tier.length;
+      for (var j = 0; j < tier.length; j++) {
+        covered += tier[j].ids.length;
+        if (covered >= need) { k = j + 1; break; }
+      }
+      var options = sideCombos(locked, tier.slice(0, k + TIER_WINDOW), need);
+      if (!options.length && k + TIER_WINDOW < tier.length) options = sideCombos(locked, tier, need);
+      if (options.length) return options;
+      // A locked single with only pairs behind them: the single gives way
+      // for this court and stays first in line for the next, as on a
+      // regular court.
+      if (!locked.length) return [];
+      locked.sort(byEntitlement);
+      tier.push(locked.pop());
+    }
+  }
+
+  function sideCombos(locked, candidates, need) {
+    var base = [];
+    locked.forEach(function (u) { base = base.concat(u.ids); });
+    return pickCombos(candidates, need).map(function (pick) {
+      var ids = base.slice(), penalty = 0;
+      pick.forEach(function (u) { ids = ids.concat(u.ids); });
+      pick.forEach(function (chosen) {
+        candidates.forEach(function (other) {
+          if (pick.indexOf(other) < 0 && outranks(other, chosen)) penalty += LEAPFROG_PENALTY;
+        });
+      });
+      return { ids: ids, penalty: penalty };
+    });
+  }
+
+  /*
    * Validate a final score for first-to-11, straight up. The winner always
    * has exactly 11 and the loser anything from 0 to 10. Under 11 the game is
    * not finished; over 11 is not possible, because it ended at 11. Both are
@@ -699,6 +824,7 @@
         id: Storage_.newId(),
         court: c,
         seq: session.nextSeq++,
+        startedAt: Date.now(),
         teamA: next.teamA,
         teamB: next.teamB,
         scoreA: null,
@@ -710,6 +836,8 @@
       // A tournament game carries its division, so the record keeps it
       // even if a level is edited later.
       if (next.category !== undefined) game.category = next.category;
+      // A two-group game records which group each team is.
+      if (next.groups) game.groups = next.groups;
       session.games.push(game);
       started.push(game);
     }
@@ -880,6 +1008,43 @@
     return { rows: rows, start: rating };
   }
 
+  /*
+   * Game clocks. Every game started since this shipped carries startedAt;
+   * with finishedAt that is its length. Games from before have no clock
+   * and are simply left out of the averages.
+   */
+  function gameDuration(m) {
+    if (!m.startedAt || !m.finishedAt || m.finishedAt < m.startedAt) return null;
+    return m.finishedAt - m.startedAt;
+  }
+
+  /* Each player's time on court this session - timed games, total and
+     average, in ms - over the scored games that have a clock. */
+  function playTimes(session) {
+    var out = {};
+    sessionMatches(session).forEach(function (m) {
+      if (!m.done) return;
+      var d = gameDuration(m);
+      if (d === null) return;
+      m.teamA.concat(m.teamB).forEach(function (id) {
+        var t = out[id] || (out[id] = { games: 0, total: 0, avg: 0 });
+        t.games++;
+        t.total += d;
+        t.avg = Math.round(t.total / t.games);
+      });
+    });
+    return out;
+  }
+
+  /* "13m 20s", "45s", "1h 02m" - ASCII, so it can go in a PDF note. */
+  function fmtDuration(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h) return h + 'h ' + (m < 10 ? '0' : '') + m + 'm';
+    if (m) return m + 'm ' + (sec < 10 ? '0' : '') + sec + 's';
+    return sec + 's';
+  }
+
   /* Everyone who was part of a session: still checked in, or finished a game
      before leaving. Used for the "N players" figure and the standings. */
   function sessionParticipants(session) {
@@ -915,6 +1080,33 @@
     return out;
   }
 
+  /* The two groups of a two-group tournament, in order, each with everyone
+     who is or was in it - a player who left keeps their group. */
+  function tournamentGroups(session) {
+    var ids = [[], []];
+    sessionParticipants(session).forEach(function (id) {
+      var g = playerGroup(session, id);
+      if (g >= 0) ids[g].push(id);
+    });
+    return ids.map(function (members, g) {
+      return { index: g, label: groupLabel(session, g), ids: members };
+    });
+  }
+
+  /* The score between the groups: games won and points scored by each,
+     over every scored game. Team A is always the first group. */
+  function groupScore(session) {
+    var score = { wins: [0, 0], points: [0, 0], games: 0 };
+    sessionMatches(session).forEach(function (m) {
+      if (!m.done) return;
+      score.games++;
+      score.points[0] += m.scoreA;
+      score.points[1] += m.scoreB;
+      score.wins[m.scoreA > m.scoreB ? 0 : 1]++;
+    });
+    return score;
+  }
+
   /*
    * Standings. Two lists: the board, and special mentions.
    *
@@ -927,7 +1119,8 @@
    * dropped. Ties fall through to name so screen and PDF agree exactly.
    *
    * Notes are deterministic and ASCII only - the PDF writer cannot print
-   * anything outside Latin-1.
+   * anything outside Latin-1. Given the session's play times (playTimes),
+   * each note also reports the player's average time on court.
    */
   function boardNote(r, index, maxGames) {
     if (index === 0) return 'Top of the board - the most wins on the night.';
@@ -950,18 +1143,23 @@
     return rec + '. Come back for more games and a run at the board.';
   }
 
-  function rankStandings(stats, playersById, restrictIds) {
+  function rankStandings(stats, playersById, restrictIds, times) {
     var ids = restrictIds || Object.keys(stats);
     var rows = ids.filter(function (id) {
       return stats[id] && playersById[id] && stats[id].games > 0;
     }).map(function (id) {
       var s = stats[id];
+      var t = times && times[id];
       return {
         id: id, name: playersById[id].name, rating: playersById[id].rating,
         games: s.games, wins: s.wins, losses: s.losses,
-        pct: s.wins / s.games, diff: s.pf - s.pa, rank: 0, note: ''
+        pct: s.wins / s.games, diff: s.pf - s.pa, rank: 0, note: '',
+        avgGame: t && t.games ? t.avg : null
       };
     });
+    function timeNote(r) {
+      if (r.avgGame !== null) r.note += ' Average game time: ' + fmtDuration(r.avgGame) + '.';
+    }
 
     var maxGames = rows.reduce(function (m, r) { return Math.max(m, r.games); }, 0);
     var minGames = Math.max(1, Math.ceil(maxGames / 2));
@@ -974,7 +1172,7 @@
       if (b.games !== a.games) return b.games - a.games;
       return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     });
-    ranked.forEach(function (r, i) { r.rank = i + 1; r.note = boardNote(r, i, maxGames); });
+    ranked.forEach(function (r, i) { r.rank = i + 1; r.note = boardNote(r, i, maxGames); timeNote(r); });
 
     var mentions = rows.filter(function (r) { return r.games < minGames; });
     mentions.sort(function (a, b) {
@@ -983,7 +1181,7 @@
       if (b.diff !== a.diff) return b.diff - a.diff;
       return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
     });
-    mentions.forEach(function (r) { r.note = mentionNote(r); });
+    mentions.forEach(function (r) { r.note = mentionNote(r); timeNote(r); });
 
     return { ranked: ranked, mentions: mentions, minGames: minGames, maxGames: maxGames };
   }
@@ -1023,6 +1221,15 @@
     unitCategory: unitCategory,
     divisionLabel: divisionLabel,
     tournamentDivisions: tournamentDivisions,
+    groupPlay: groupPlay,
+    playerGroup: playerGroup,
+    groupLabel: groupLabel,
+    unitGroup: unitGroup,
+    tournamentGroups: tournamentGroups,
+    groupScore: groupScore,
+    gameDuration: gameDuration,
+    playTimes: playTimes,
+    fmtDuration: fmtDuration,
     skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,

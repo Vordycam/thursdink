@@ -9,7 +9,8 @@
       version: 1,
       players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived, photo?: small JPEG data URL}
       sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, pairs, games, status,
-                     //  matchBySkill?, tournament?, mixedPairs?}  (a tournament game also carries its division as category)
+                     //  matchBySkill?, tournament?, mixedPairs?, groups?: {names: [a, b], of: {playerId: 0|1}}}
+                     // a game carries startedAt; a tournament game also its division as category, or its groups
     };
   }
 

@@ -348,3 +348,62 @@ table.prog th:first-child, table.prog td:first-child { text-align: left; }
 .pair-note { font-size: .8rem; font-weight: 500; color: var(--muted); }
 .pair-note.warn { color: var(--danger); font-weight: 600; }
 .tour-actions { flex-wrap: wrap; }
+
+/* ---------- Tournament format: by division, or two groups ---------- */
+:root { --blue: #1d4ed8; }
+.format-picker { display: flex; gap: 8px; flex-wrap: wrap; }
+.format-opt {
+  flex: 1 1 140px; min-height: 48px; padding: 8px 14px; font-size: 1rem; font-weight: 700;
+  border-radius: 10px; border: 2px solid var(--line); background: #fff; color: var(--text); cursor: pointer;
+}
+.format-opt.selected { border-color: var(--green); background: var(--green); color: #fff; }
+.format-note { margin: 8px 0 0; }
+/* Only the chosen format's controls are shown. */
+.tsetup.format-divisions .only-groups { display: none; }
+.tsetup.format-groups .only-divisions { display: none; }
+.tsetup.format-groups .division-count { display: none; }
+#tsetup-count.warn { color: var(--danger); font-weight: 600; }
+.group-names { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.group-names input {
+  flex: 1 1 120px; min-width: 0; min-height: 44px; font-size: 1rem; padding: 8px 12px;
+  border: 1px solid var(--line); border-radius: 10px;
+}
+/* The switch beside each name that puts a player in a group. */
+.group-pick {
+  display: inline-flex; flex: none; border: 1px solid var(--line); border-radius: 8px; overflow: hidden;
+}
+.grp-opt {
+  min-height: 34px; padding: 4px 10px; font-size: .8rem; font-weight: 700; border: none; background: #fff;
+  color: var(--muted); cursor: pointer; max-width: 92px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.grp-opt + .grp-opt { border-left: 1px solid var(--line); }
+.grp-opt.selected { color: #fff; }
+.grp-opt.selected[data-group="0"] { background: var(--green); }
+.grp-opt.selected[data-group="1"] { background: var(--blue); }
+/* Live: a tag per team, one colour per group, and the scoreboard. */
+.group-tag {
+  display: inline-block; font-size: .68rem; font-weight: 800; letter-spacing: .06em;
+  text-transform: uppercase; color: #fff; background: var(--green);
+  border-radius: 6px; padding: 2px 7px; vertical-align: middle; max-width: 140px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.group-tag.g1 { background: var(--blue); }
+.scoreboard { text-align: center; }
+.score-row { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.score-side { flex: 1 1 0; min-width: 0; }
+.score-name { font-weight: 800; font-size: 1rem; overflow-wrap: anywhere; }
+.score-num { font-size: 2.6rem; font-weight: 900; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.score-side.g0 .score-num { color: var(--green); }
+.score-side.g1 .score-num { color: var(--blue); }
+.score-sub { font-size: .85rem; }
+.score-dash { font-size: 2rem; color: var(--muted); font-weight: 300; }
+.score-note { margin: 8px 0 0; }
+
+/* ---------- Game clocks ---------- */
+/* On the court label: how long the game has been on. */
+.game-time {
+  float: right; font-size: .85rem; font-weight: 700; letter-spacing: 0; text-transform: none;
+  color: var(--muted); font-variant-numeric: tabular-nums;
+}
+/* On a finished result: how long it took. */
+.fin-time { font-size: .8rem; font-weight: 500; }

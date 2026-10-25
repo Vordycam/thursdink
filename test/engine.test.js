@@ -1221,3 +1221,313 @@ test('mixed-level pairs: a level edited apart mid-tournament moves the pair up i
     assert.equal(Engine.skillCategory(byId[id].skill), 'Intermediate', `${id} is not an Intermediate`);
   });
 });
+
+/* ── tournament: two groups ───────────────────────────────────────────── */
+
+/* A two-group tournament: `table` maps id -> group (0 or 1); everyone is a
+   3.5 unless `skills` says otherwise. */
+function grouped(table, courts, skills) {
+  const ids = Object.keys(table);
+  const byId = {};
+  ids.forEach((id) => {
+    const skill = (skills && skills[id]) || '3.5';
+    byId[id] = { id, name: id, skill, rating: Engine.initialRating(skill) };
+  });
+  const sess = session(ids, courts || 1);
+  sess.tournament = true;
+  sess.groups = { names: ['Reds', 'Blues'], of: Object.assign({}, table) };
+  return { byId, sess };
+}
+
+function groupsOf(game, sess) {
+  return [game.teamA.map((id) => Engine.playerGroup(sess, id)), game.teamB.map((id) => Engine.playerGroup(sess, id))];
+}
+
+test('two groups: off unless the tournament sets them; names and membership read safely', () => {
+  const sess = session(['A', 'B', 'C', 'D']);
+  assert.equal(Engine.groupPlay(sess), false, 'a regular session');
+  sess.tournament = true;
+  assert.equal(Engine.groupPlay(sess), false, 'a tournament by division, as saved before this option');
+  assert.equal(Engine.playerGroup(sess, 'A'), -1);
+  assert.equal(Engine.groupLabel(sess, 0), 'Group A', 'default names');
+  assert.equal(Engine.groupLabel(sess, 1), 'Group B');
+  sess.groups = { names: ['Sales', 'Marketing'], of: { A: 0, B: 0, C: 1, D: 1 } };
+  assert.equal(Engine.groupPlay(sess), true);
+  assert.equal(Engine.playerGroup(sess, 'A'), 0);
+  assert.equal(Engine.playerGroup(sess, 'D'), 1);
+  assert.equal(Engine.playerGroup(sess, 'Z'), -1, 'no group');
+  assert.equal(Engine.groupLabel(sess, 1), 'Marketing');
+  assert.equal(Engine.unitGroup(sess, { ids: ['A', 'B'] }), 0);
+  assert.equal(Engine.unitGroup(sess, { ids: ['A', 'C'] }), -1, 'a pair across the groups cannot be seated');
+  assert.equal(Engine.unitGroup(sess, { ids: ['Z'] }), -1);
+  const plain = session(['A', 'B', 'C', 'D']);
+  plain.groups = sess.groups;
+  assert.equal(Engine.groupPlay(plain), false, 'groups mean nothing outside a tournament');
+});
+
+test('two groups: every game is two from one group against two from the other, over a long night', () => {
+  // Ten against ten on three courts with random game lengths. Team A is
+  // always the first group and team B the second, nobody ever partners or
+  // faces their own group, and everyone gets a fair share of games.
+  const table = {};
+  'ABCDEFGHIJ'.split('').forEach((id) => { table[id] = 0; });
+  'KLMNOPQRST'.split('').forEach((id) => { table[id] = 1; });
+  const { byId, sess } = grouped(table, 3);
+  assert.equal(Engine.fillCourts(sess, byId).length, 3, 'all three courts fill');
+  for (let round = 0; round < 60; round++) {
+    // Courts finish in no particular order, as on a real night.
+    const active = Engine.activeGames(sess);
+    const g = active[Math.floor(Math.random() * active.length)];
+    advance(2 * MIN + Math.floor(Math.random() * 6 * MIN));
+    Engine.completeGame(g, 11, Math.floor(Math.random() * 11));
+    const started = Engine.fillCourts(sess, byId);
+    // Longest wait first holds within each group: nobody left waiting has
+    // waited more than the tie window longer than a group-mate who went on.
+    started.forEach((game) => {
+      [game.teamA, game.teamB].forEach((team, grp) => {
+        const latestChosen = Math.max(...team.map((id) => Engine.waitSince(sess, id)));
+        Engine.waitingPool(sess).filter((id) => table[id] === grp).forEach((waiter) => {
+          assert.ok(Engine.waitSince(sess, waiter) >= latestChosen - Engine.TIE_WINDOW_MS,
+            `${waiter} waited since ${Engine.waitSince(sess, waiter)} but ${latestChosen} was chosen`);
+        });
+      });
+    });
+  }
+  assert.ok(sess.games.length >= 60);
+  sess.games.forEach((g) => {
+    assert.deepEqual(groupsOf(g, sess), [[0, 0], [1, 1]], `${g.teamA} v ${g.teamB}`);
+    assert.deepEqual(g.groups, [0, 1], 'the game records its groups');
+    assert.equal(g.category, undefined, 'and no division');
+  });
+  const counts = Engine.sessionCounts(sess).games;
+  const played = Object.keys(table).map((id) => counts[id] || 0);
+  assert.ok(Math.min(...played) >= 9, `someone played only ${Math.min(...played)} games`);
+  // Longest wait first is the guarantee (asserted above); with random game
+  // lengths the counts still stay close, as on a regular night.
+  assert.ok(Math.max(...played) - Math.min(...played) <= 6, `uneven share: ${played}`);
+});
+
+test('two groups: a court is never filled from one group alone', () => {
+  // Five Reds and one Blue: nobody can play. A second Blue arrives: one court.
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, D: 0, E: 0, K: 1, L: 1 }, 2);
+  sess.playerIds = ['A', 'B', 'C', 'D', 'E', 'K'];           // L has not arrived yet
+  assert.equal(Engine.fillCourts(sess, byId).length, 0, 'one Blue cannot make a side');
+  advance(10 * MIN);
+  assert.equal(Engine.fillCourts(sess, byId).length, 0, 'however long the Reds wait');
+  Engine.setSessionPlayers(sess, ['A', 'B', 'C', 'D', 'E', 'K', 'L']);
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 1, 'two Blues: one court; the other stays free');
+  assert.deepEqual(started[0].teamB.slice().sort(), ['K', 'L']);
+  assert.deepEqual(groupsOf(started[0], sess), [[0, 0], [1, 1]]);
+  assert.equal(Engine.waitingPool(sess).length, 3, 'three Reds wait');
+});
+
+test('two groups: uneven groups still play, the smaller group more often and evenly', () => {
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, D: 0, E: 0, F: 0, K: 1, L: 1, M: 1 }, 2);
+  Engine.fillCourts(sess, byId);
+  for (let round = 0; round < 30; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(5 * MIN);
+    Engine.completeGame(g, 11, 5);
+    Engine.fillCourts(sess, byId);
+  }
+  sess.games.forEach((g) => assert.deepEqual(groupsOf(g, sess), [[0, 0], [1, 1]]));
+  const counts = Engine.sessionCounts(sess).games;
+  const reds = ['A', 'B', 'C', 'D', 'E', 'F'].map((id) => counts[id]);
+  const blues = ['K', 'L', 'M'].map((id) => counts[id]);
+  assert.ok(Math.min(...blues) > Math.max(...reds), `Blues ${blues} should play more than Reds ${reds}`);
+  assert.ok(Math.max(...blues) - Math.min(...blues) <= 1, `Blues share evenly: ${blues}`);
+  assert.ok(Math.max(...reds) - Math.min(...reds) <= 1, `Reds share evenly: ${reds}`);
+});
+
+test('two groups: within a group, longest wait first', () => {
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, D: 0, K: 1, L: 1, M: 1, N: 1 }, 1);
+  played(sess, ['A', 'B'], ['K', 'L']);            // A, B, K, L free at t0
+  advance(10 * MIN);
+  played(sess, ['C', 'D'], ['M', 'N']);            // C, D, M, N free ten minutes later
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g.teamA.slice().sort(), ['A', 'B'], 'the Reds who waited longest');
+  assert.deepEqual(g.teamB.slice().sort(), ['K', 'L'], 'the Blues who waited longest');
+  advance(5 * MIN);
+  Engine.completeGame(g, 11, 2);                   // C, D, M, N have now waited five minutes longer
+  const g2 = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g2.teamA.slice().sort(), ['C', 'D']);
+  assert.deepEqual(g2.teamB.slice().sort(), ['M', 'N']);
+  advance(5 * MIN);
+  Engine.completeGame(g2, 11, 2);
+  const g3 = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g3.teamA.slice().sort(), ['A', 'B'], 'and back again');
+  assert.deepEqual(g3.teamB.slice().sort(), ['K', 'L']);
+});
+
+test('two groups: on equal waits, fewer games goes first', () => {
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, K: 1, L: 1, M: 1 }, 1);
+  played(sess, ['A', 'B'], ['K', 'L']);
+  played(sess, ['A', 'C'], ['K', 'M']);            // A and K on two games, the rest on one, all free now
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g.teamA.slice().sort(), ['B', 'C'], `A has played more: ${g.teamA}`);
+  assert.deepEqual(g.teamB.slice().sort(), ['L', 'M'], `K has played more: ${g.teamB}`);
+});
+
+test('two groups: fixed partners play together, must share a group, and a straddling pair is never seated', () => {
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, D: 0, E: 0, F: 0, K: 1, L: 1, M: 1, N: 1, O: 1, P: 1 }, 2);
+  sess.pairs = [];
+  assert.equal(Engine.setPair(sess, 'A', 'B', byId).ok, true, 'two Reds can pair');
+  const cross = Engine.setPair(sess, 'C', 'K', byId);
+  assert.equal(cross.ok, false, 'a Red and a Blue cannot');
+  assert.match(cross.error, /same group/);
+  assert.equal(Engine.setPair(sess, 'C', 'K').ok, false, 'with or without the players');
+  assert.equal(Engine.setPair(sess, 'C', 'D', byId).ok, true);
+  Engine.clearPair(sess, 'C');
+  assert.deepEqual(sess.pairs, [['A', 'B']]);
+
+  Engine.fillCourts(sess, byId);
+  for (let round = 0; round < 24; round++) {
+    const active = Engine.activeGames(sess);
+    const g = active[round % active.length];
+    advance(3 * MIN);
+    Engine.completeGame(g, 11, 5);
+    Engine.fillCourts(sess, byId);
+  }
+  let pairGames = 0;
+  sess.games.forEach((g) => {
+    assert.deepEqual(groupsOf(g, sess), [[0, 0], [1, 1]]);
+    if (onCourt(g).includes('A') || onCourt(g).includes('B')) {
+      pairGames++;
+      assert.ok(sameTeam(g, 'A', 'B'), `the pair is split: ${g.teamA} v ${g.teamB}`);
+    }
+  });
+  assert.ok(pairGames >= 4, `the pair played only ${pairGames} games`);
+
+  // B is moved to the Blues while still paired with A: the pair straddles
+  // the groups and sits out; the other ten carry on.
+  Engine.activeGames(sess).forEach((g) => Engine.completeGame(g, 11, 2));
+  sess.groups.of.B = 1;
+  const unit = Engine.queueUnits(sess, byId).find((u) => u.ids.includes('A'));
+  assert.deepEqual(unit.ids.slice().sort(), ['A', 'B']);
+  assert.equal(Engine.unitGroup(sess, unit), -1);
+  const started = Engine.fillCourts(sess, byId);
+  assert.equal(started.length, 2, 'the other ten still fill both courts');
+  started.forEach((g) => assert.ok(!onCourt(g).includes('A') && !onCourt(g).includes('B'), 'the straddling pair sits'));
+});
+
+test('two groups: a lone single with only a pair behind them gives way, and is first for the next court', () => {
+  const { byId, sess } = grouped({ X: 0, Y: 0, Z: 0, K: 1, L: 1, M: 1, W: 0 }, 1);
+  sess.playerIds = ['X', 'Y', 'Z', 'K', 'L', 'M'];
+  sess.pairs = [['Y', 'Z']];
+  advance(5 * MIN);
+  played(sess, ['Y', 'Z'], ['K', 'L']);            // X has waited five minutes longer than anyone
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g.teamA.slice().sort(), ['Y', 'Z'], 'X alone cannot make a side with a pair: the pair plays');
+  assert.ok(!onCourt(g).includes('X'));
+  advance(5 * MIN);
+  Engine.completeGame(g, 11, 4);
+  Engine.setSessionPlayers(sess, ['X', 'Y', 'Z', 'K', 'L', 'M', 'W']);   // another Red arrives
+  const g2 = Engine.fillCourts(sess, byId)[0];
+  assert.deepEqual(g2.teamA.slice().sort(), ['W', 'X'], 'X, still first in line, plays with the newcomer');
+});
+
+test('two groups: the score between the groups, and a board per group', () => {
+  const { byId, sess } = grouped({ A: 0, B: 0, C: 0, K: 1, L: 1, M: 1 }, 1);
+  played(sess, ['A', 'B'], ['K', 'L'], 11, 7);
+  played(sess, ['A', 'C'], ['K', 'M'], 9, 11);
+  played(sess, ['B', 'C'], ['L', 'M'], 11, 3);
+  sess.games.push({ id: 'live', court: 1, seq: 9, teamA: ['A', 'B'], teamB: ['K', 'L'], scoreA: null, scoreB: null, done: false });
+  assert.deepEqual(Engine.groupScore(sess), { wins: [2, 1], points: [31, 21], games: 3 }, 'a game in progress does not count');
+  Engine.setSessionPlayers(sess, ['A', 'B', 'K', 'L']);   // C and M go home
+  const groups = Engine.tournamentGroups(sess);
+  assert.deepEqual(groups.map((g) => g.label), ['Reds', 'Blues']);
+  assert.deepEqual(groups.map((g) => g.index), [0, 1]);
+  assert.deepEqual(groups[0].ids.slice().sort(), ['A', 'B', 'C'], 'C left but played, and keeps their group');
+  assert.deepEqual(groups[1].ids.slice().sort(), ['K', 'L', 'M']);
+  const stats = Engine.computeStats([sess]);
+  const reds = Engine.rankStandings(stats, byId, groups[0].ids);
+  assert.deepEqual(reds.ranked.map((r) => r.id), ['B', 'C', 'A'], 'B 2-0; C and A 1-1, C on point difference');
+  const blues = Engine.rankStandings(stats, byId, groups[1].ids);
+  assert.deepEqual(blues.ranked.map((r) => r.id), ['K', 'M', 'L'], 'K and M 1-1, K on point difference; L 0-2');
+});
+
+/* ── game clocks ──────────────────────────────────────────────────────── */
+
+test('game clocks: every new game is stamped when it starts; its length is known once scored', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E']);
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  const g = Engine.fillCourts(sess, byId)[0];
+  assert.equal(g.startedAt, clock, 'a regular game carries its start time');
+  assert.equal(g.groups, undefined, 'and no groups');
+  assert.equal(Engine.gameDuration(g), null, 'not finished: no length yet');
+  advance(13 * MIN + 20_000);
+  Engine.completeGame(g, 11, 8);
+  assert.equal(Engine.gameDuration(g), 13 * MIN + 20_000);
+  const legacy = { teamA: ['A', 'B'], teamB: ['C', 'D'], done: true, finishedAt: clock, scoreA: 11, scoreB: 1 };
+  assert.equal(Engine.gameDuration(legacy), null, 'a game from before clocks has no length');
+  assert.equal(Engine.gameDuration({ startedAt: 10, finishedAt: 5 }), null, 'a clock that runs backwards is ignored');
+
+  const table = { P: '3.0', Q: '3.0', R: '3.5', S: '3.5' };
+  const tById = levelled(table);
+  const tsess = session(Object.keys(table));
+  tsess.tournament = true;
+  const tg = Engine.fillCourts(tsess, tById)[0];
+  assert.equal(tg.startedAt, clock, 'a division game too');
+  assert.equal(tg.category, 'Novice');
+  assert.equal(tg.groups, undefined);
+});
+
+test('game clocks: play times average each player\'s timed games; untimed games are left out', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  const sess = session(['A', 'B', 'C', 'D'], 1);
+  assert.deepEqual(Engine.playTimes(sess), {}, 'nothing played');
+  const g1 = Engine.fillCourts(sess, byId)[0];
+  advance(10 * MIN);
+  Engine.completeGame(g1, 11, 0);
+  const g2 = Engine.fillCourts(sess, byId)[0];
+  advance(20 * MIN);
+  Engine.completeGame(g2, 11, 0);
+  played(sess, ['A', 'B'], ['C', 'D']);            // recorded without a clock
+  const live = Engine.fillCourts(sess, byId)[0];  // in progress: not counted either
+  assert.ok(live && !live.done);
+  const times = Engine.playTimes(sess);
+  ['A', 'B', 'C', 'D'].forEach((id) => {
+    assert.equal(times[id].games, 2, `${id}: two timed games`);
+    assert.equal(times[id].total, 30 * MIN);
+    assert.equal(times[id].avg, 15 * MIN);
+  });
+  assert.equal(Engine.fmtDuration(0), '0s');
+  assert.equal(Engine.fmtDuration(45_000), '45s');
+  assert.equal(Engine.fmtDuration(13 * MIN + 20_000), '13m 20s');
+  assert.equal(Engine.fmtDuration(62 * MIN + 5_000), '1h 02m');
+});
+
+test('game clocks: standings notes report the average game time when the play times are given', () => {
+  const byId = players(['A', 'B', 'C', 'D', 'E']);
+  const sess = session(['A', 'B', 'C', 'D', 'E'], 1);
+  const g1 = { id: 'c1', court: 1, seq: 1, startedAt: clock, teamA: ['A', 'B'], teamB: ['C', 'D'], scoreA: null, scoreB: null, done: false };
+  sess.games.push(g1);
+  advance(12 * MIN + 30_000);
+  Engine.completeGame(g1, 11, 4);
+  played(sess, ['A', 'E'], ['C', 'D'], 11, 9);     // E's only game has no clock
+  const stats = Engine.computeStats([sess]);
+  const plain = Engine.rankStandings(stats, byId, null);
+  plain.ranked.concat(plain.mentions).forEach((r) => {
+    assert.doesNotMatch(r.note, /Average game time/, 'without the times, notes read as before');
+    assert.equal(r.avgGame, null);
+  });
+  const timed = Engine.rankStandings(stats, byId, null, Engine.playTimes(sess));
+  const rows = timed.ranked.concat(timed.mentions);
+  assert.equal(rows.length, 5);
+  rows.forEach((r) => {
+    if (r.id === 'E') {
+      assert.equal(r.avgGame, null, 'no timed game: no average');
+      assert.doesNotMatch(r.note, /Average game time/);
+    } else {
+      assert.equal(r.avgGame, 12 * MIN + 30_000);
+      assert.match(r.note, / Average game time: 12m 30s\.$/);
+    }
+    assert.ok(/^[\x20-\x7e]+$/.test(r.note), `PDF-safe: ${r.note}`);
+  });
+  assert.deepEqual(
+    Engine.rankStandings(stats, byId, null, Engine.playTimes(sess)).ranked.map((r) => [r.id, r.note]),
+    rows.filter((r) => r.rank).map((r) => [r.id, r.note]),
+    'same input, same output');
+});

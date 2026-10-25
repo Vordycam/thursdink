@@ -1785,3 +1785,23 @@ test('playerForm: the last results, oldest first, across sessions', () => {
   s3.games.push({ id: 'x2', court: 2, seq: 2, teamA: ['C', 'D'], teamB: ['A', 'B'], scoreA: 11, scoreB: 0, done: true, finishedAt: clock + 100 });
   assert.deepEqual(Engine.playerForm('A', [s3], 5), ['L', 'W']);
 });
+
+/* ── the level a rating suggests ──────────────────────────────────────── */
+
+test('suggestedSkill: the nearest level by starting rating, ties to the lower level', () => {
+  assert.equal(Engine.suggestedSkill(1250), '3.5');
+  assert.equal(Engine.suggestedSkill(1324), '3.5');
+  assert.equal(Engine.suggestedSkill(1325), '3.5', 'halfway: the lower level');
+  assert.equal(Engine.suggestedSkill(1326), '4.0');
+  assert.equal(Engine.suggestedSkill(650), '1.0', 'below the scale');
+  assert.equal(Engine.suggestedSkill(2000), '5.5', 'above it');
+  Engine.SKILL_LEVELS.forEach((s) => assert.equal(Engine.suggestedSkill(Engine.initialRating(s)), s, 'a starting rating is its own level'));
+});
+
+test('levelDrift: steps from the listed level, signed; null off the scale', () => {
+  assert.deepEqual(Engine.levelDrift({ skill: '3.5', rating: 1250 }), { suggested: '3.5', steps: 0 });
+  assert.deepEqual(Engine.levelDrift({ skill: '3.5', rating: 1560 }), { suggested: '4.5', steps: 2 });
+  assert.deepEqual(Engine.levelDrift({ skill: '4.5', rating: 1060 }), { suggested: '3.0', steps: -3 });
+  assert.deepEqual(Engine.levelDrift({ skill: '2.0', rating: 940 }), { suggested: '2.0', steps: 0 });
+  assert.equal(Engine.levelDrift({ skill: 'x', rating: 1250 }), null);
+});

@@ -213,6 +213,27 @@
     return SKILL_RATINGS[skill] || 1250;
   }
 
+  /* The level whose starting rating is nearest to `rating`; a tie goes to
+     the lower level. */
+  function suggestedSkill(rating) {
+    var best = SKILL_LEVELS[0], bestGap = Infinity;
+    SKILL_LEVELS.forEach(function (s) {
+      var gap = Math.abs(SKILL_RATINGS[s] - rating);
+      if (gap < bestGap) { bestGap = gap; best = s; }
+    });
+    return best;
+  }
+
+  /* How far a player's rating has drifted from the level they are listed
+     at, in steps on the scale - positive means playing above it. Null for
+     a level off the scale. */
+  function levelDrift(player) {
+    var from = SKILL_LEVELS.indexOf(player.skill);
+    if (from < 0) return null;
+    var suggested = suggestedSkill(player.rating);
+    return { suggested: suggested, steps: SKILL_LEVELS.indexOf(suggested) - from };
+  }
+
   function pairKey(a, b) {
     return a < b ? a + '|' + b : b + '|' + a;
   }
@@ -1367,6 +1388,8 @@
 
   window.Engine = {
     initialRating: initialRating,
+    suggestedSkill: suggestedSkill,
+    levelDrift: levelDrift,
     sessionMatches: sessionMatches,
     activeGames: activeGames,
     waitingPool: waitingPool,

@@ -222,6 +222,35 @@
       (tour ? 'Open the Tournament tab' : 'Open the Play tab') + '</button></div>';
   }
 
+  /* A search box for a long list of names, on the roster and the check-in
+     lists. Short rosters do not need one. */
+  var FILTER_FROM = 12;
+
+  function rosterFilterHtml(count) {
+    if (count < FILTER_FROM) return '';
+    return '<input type="search" class="row-filter" placeholder="Find a name" aria-label="Find a name" autocomplete="off">';
+  }
+
+  /* Hide the rows in the box's own list whose name does not contain what
+     was typed. The rows stay checked or unchecked as they were. */
+  function applyRowFilter(input) {
+    var q = input.value.trim().toLowerCase();
+    var scope = input.closest('.card, .field') || document;
+    scope.querySelectorAll('.check-row, .player-row').forEach(function (row) {
+      var name = row.querySelector('.check-name, .player-main');
+      row.hidden = !!q && !!name && name.textContent.toLowerCase().indexOf(q) < 0;
+    });
+  }
+
+  /* The check boxes a Select all / none applies to: the ones not hidden
+     by a filter. With no filter, all of them, as before. */
+  function visibleChecks(selector) {
+    return Array.prototype.slice.call(document.querySelectorAll(selector)).filter(function (c) {
+      var row = c.closest('.check-row');
+      return !row || !row.hidden;
+    });
+  }
+
   function renderSessionSetup() {
     var roster = DB.players.filter(function (p) { return !p.archived; });
     if (roster.length < 4) {
@@ -248,7 +277,7 @@
       '</div></div>' +
       '<div class="field"><label>Who is playing today? <span class="muted" id="setup-count"></span></label>' +
       '<div class="setup-actions"><button class="btn small" data-action="setup-all">Select all</button>' +
-      '<button class="btn small" data-action="setup-none">Select none</button></div>' +
+      '<button class="btn small" data-action="setup-none">Select none</button>' + rosterFilterHtml(roster.length) + '</div>' +
       '<div class="check-list">' + checks + '</div></div>' +
       '<div class="field"><label>Fixed partners <span class="muted">(optional)</span></label>' +
       '<p class="muted small-note pairs-help">For anyone who wants to keep one partner all night. ' +
@@ -333,9 +362,18 @@
     return html;
   }
 
+  /* Games still running on courts the host has since closed: they finish,
+     and nothing new starts there. */
+  function closingCourtsHtml(actives, session, card) {
+    return actives.filter(function (g) { return g.court > session.courtCount; })
+      .sort(function (a, b) { return a.court - b.court; })
+      .map(card).join('');
+  }
+
   /* `sideTags`, in a two-group tournament, names each team's group. The
-     court label carries the game's clock. */
-  function renderActiveGameCard(m, byId, fixed, levels, badge, sideTags) {
+     court label carries the game's clock; `closing` marks a court that
+     closes after this game. */
+  function renderActiveGameCard(m, byId, fixed, levels, badge, sideTags, closing) {
     var scoreRow = function (side, team) {
       var v = side === 'A' ? m.scoreA : m.scoreB;
       var val = (v === null || v === undefined) ? '' : v;
@@ -350,7 +388,8 @@
         '</div></div>';
     };
     return '<div class="match-card">' +
-      '<div class="court-label">Court ' + m.court + divisionTag(badge) + gameClockHtml(m) + '</div>' +
+      '<div class="court-label">Court ' + m.court + divisionTag(badge) +
+      (closing ? ' <span class="closing-note">closing after this game</span>' : '') + gameClockHtml(m) + '</div>' +
       scoreRow('A', m.teamA) +
       '<div class="vs">vs</div>' +
       scoreRow('B', m.teamB) +
@@ -381,7 +420,7 @@
 
   /* `sideTags`, in a two-group tournament, names each team's group. A
      game with a clock shows how long it took. */
-  function renderFinishedGameRow(m, byId, badge, sideTags) {
+  function renderFinishedGameRow(m, byId, badge, sideTags, readOnly) {
     var aWon = m.scoreA > m.scoreB;
     var dur = Engine.gameDuration(m);
     return '<div class="finished-row">' +
@@ -392,8 +431,23 @@
       ' &ndash; ' +
       '<span class="' + (!aWon ? 'fin-win' : '') + '">' + m.scoreB + ' ' + (sideTags ? sideTags[1] + ' ' : '') + teamNames(m.teamB, byId) + '</span>' +
       '</span>' +
-      '<button class="btn small" data-action="edit-finished" data-match="' + m.id + '">Edit</button>' +
+      (readOnly ? '' : '<button class="btn small" data-action="edit-finished" data-match="' + m.id + '">Edit</button>') +
       '</div>';
+  }
+
+  /* A saved session's games in the order they were played, with no Edit:
+     a night that has ended is read-only. */
+  function pastGamesHtml(sess, byId) {
+    var done = Engine.sessionMatches(sess).filter(function (m) { return m.done; });
+    if (!done.length) return '';
+    var groups = Engine.groupPlay(sess);
+    var tags = groups ? [groupTag(sess, 0), groupTag(sess, 1)] : null;
+    done.sort(function (a, b) { return ((a.finishedAt || 0) - (b.finishedAt || 0)) || ((a.seq || 0) - (b.seq || 0)); });
+    return '<details class="round-past"><summary>Games (' + done.length + ')</summary><div class="finished-list">' +
+      done.map(function (m) {
+        var badge = sess.tournament && !groups ? Engine.divisionLabel(gameDivision(m, byId)) : null;
+        return renderFinishedGameRow(m, byId, badge, tags, true);
+      }).join('') + '</div></details>';
   }
 
   /* One entry in a waiting line: a player or a fixed pair, with their clock,
@@ -436,6 +490,7 @@
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
       '<button class="btn small' + (skill ? ' on' : '') + '" data-action="toggle-skill-match">Skill match: ' + (skill ? 'On' : 'Off') + '</button>' +
+      '<button class="btn small" data-action="change-courts">Courts: ' + session.courtCount + '</button>' +
       undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End session</button>' +
       '</div></div>';
@@ -446,6 +501,7 @@
       actives.forEach(function (a) { if (a.court === c) g = a; });
       html += g ? renderActiveGameCard(g, byId, fixed, skill) : renderFreeCourtCard(c, pool.length, readyCount);
     }
+    html += closingCourtsHtml(actives, session, function (cg) { return renderActiveGameCard(cg, byId, fixed, skill, null, null, true); });
     html += '</div>';
 
     if (pool.length) {
@@ -703,6 +759,7 @@
       '<button class="btn small" data-action="tsetup-none">Select none</button>' +
       '<button class="btn small only-groups" data-action="tsetup-autosplit">Auto-split by skill</button>' +
       (lastGroupSession() ? '<button class="btn small only-groups" data-action="tsetup-reuse-groups">Use last tournament\'s groups</button>' : '') +
+      rosterFilterHtml(roster.length) +
       '</div>' +
       '<div class="check-list divisions-list">' + divisions + '</div>' +
       '<p class="muted small-note only-divisions">A division needs 4 players checked in to get a court. ' +
@@ -951,6 +1008,7 @@
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
       '<button class="btn small' + (mixedOn ? ' on' : '') + '" data-action="toggle-mixed-pairs">Mixed-level pairs: ' +
       (mixedOn ? 'On' : 'Off') + '</button>' +
+      '<button class="btn small" data-action="change-courts">Courts: ' + session.courtCount + '</button>' +
       undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
       '</div></div>';
@@ -970,6 +1028,9 @@
         ? renderActiveGameCard(g, byId, fixed, true, Engine.divisionLabel(gameDivision(g, byId)))
         : renderFreeCourtCard(c, 0, 0, tournamentFreeReason(lines));
     }
+    html += closingCourtsHtml(actives, session, function (cg) {
+      return renderActiveGameCard(cg, byId, fixed, true, Engine.divisionLabel(gameDivision(cg, byId)), null, true);
+    });
     html += '</div>';
 
     divisions.forEach(function (n) {
@@ -1057,6 +1118,7 @@
       '<div class="session-bar-actions tour-actions">' +
       '<button class="btn small" data-action="manage-players">Players</button>' +
       '<button class="btn small" data-action="manage-partners">Partners' + (pairCount ? ' (' + pairCount + ')' : '') + '</button>' +
+      '<button class="btn small" data-action="change-courts">Courts: ' + session.courtCount + '</button>' +
       undoButtonHtml(session) +
       '<button class="btn small danger-outline" data-action="end-session">End tournament</button>' +
       '</div></div>';
@@ -1073,6 +1135,7 @@
         ? renderActiveGameCard(g, byId, fixed, true, null, tags)
         : renderFreeCourtCard(c, 0, 0, freeReason);
     }
+    html += closingCourtsHtml(actives, session, function (cg) { return renderActiveGameCard(cg, byId, fixed, true, null, tags, true); });
     html += '</div>';
 
     [0, 1].forEach(function (gi) {
@@ -1224,7 +1287,7 @@
       '<button class="btn primary" data-action="add-player">Add</button>' +
       '</div><p class="muted small-note">Skill sets the starting rating; it adjusts automatically from results. ' +
       'Levels: ' + categoriesLine() + '.</p></div>' +
-      '<div class="card"><h2>Roster (' + roster.length + ')</h2>' +
+      '<div class="card"><h2>Roster (' + roster.length + ')</h2>' + rosterFilterHtml(roster.length) +
       (rows || '<p class="muted">No players yet.</p>') + archivedHtml + '</div>';
   }
 
@@ -1404,6 +1467,7 @@
       '<div><h2>' + esc(p.name) + '</h2>' +
       '<p class="muted">Skill ' + skillText(p.skill) + ' &middot; Rating <strong>' + p.rating + '</strong>' +
       (prog.rows.length ? ' (' + signed(change) + ' since their first game)' : '') + '</p></div></div>' +
+      levelHintHtml(p) +
       sparkline(p.ratingHistory) +
       '<div class="stat-grid">' +
       '<div class="stat-box"><div class="stat-num">' + s.games + '</div><div class="stat-lbl">Games</div></div>' +
@@ -1419,6 +1483,19 @@
       '<span class="spacer"></span>' +
       '<button class="btn" data-action="close-modal">Close</button></div>'
     );
+  }
+
+  /* When a player's rating has drifted two or more levels from the level
+     they are listed at, say so; the host decides, from Edit. */
+  function levelHintHtml(p) {
+    var drift = Engine.levelDrift(p);
+    if (!drift || Math.abs(drift.steps) < 2) return '';
+    var session = activeSession();
+    return '<p class="muted small-note level-hint">Their rating of ' + p.rating + ' sits closest to a ' + esc(drift.suggested) +
+      ' level, ' + (drift.steps > 0 ? 'above' : 'below') + ' the listed ' + esc(p.skill) + '. ' +
+      'If that matches what you see on court, update the level from Edit' +
+      (session && session.tournament && !Engine.groupPlay(session) ? '; in a tournament by division that moves them from their next game' : '') +
+      '.</p>';
   }
 
   /* A player's last five results, oldest first. Nothing until they have
@@ -1484,6 +1561,7 @@
         (sess.mixedPairs ? ' Partners of different levels were allowed; such a pair played in the higher partner\'s division.' : '') +
         '</p>' : '') +
       (board || '<p class="muted">No scored games in this session.</p>') +
+      (sess.status === 'done' ? pastGamesHtml(sess, byId) : '') +
       '<div class="modal-actions">' +
       (board ? '<button class="btn" data-action="share-results" data-session="' + sess.id + '">Share results</button><span class="spacer"></span>' : '') +
       '<button class="btn" data-action="close-modal">Close</button></div>'
@@ -1633,6 +1711,41 @@
       '<button class="btn primary" data-action="apply-manage-players">Apply</button>' +
       '</div>'
     );
+  }
+
+  /* Change how many courts are in use. A court that opens fills straight
+     away from the waiting line; a court that closes finishes the game on
+     it and gets no new one. */
+  function showChangeCourts(session) {
+    openModal(
+      '<h2>Courts</h2>' +
+      '<p class="muted small-note">How many courts are available right now. A court that opens fills straight away ' +
+      'from the waiting line. A court that closes finishes the game already on it, and nothing new starts there.</p>' +
+      '<div class="court-picker" id="courts-picker">' +
+      [1, 2, 3, 4, 5, 6].map(function (n) {
+        return '<button class="court-opt' + (n === session.courtCount ? ' selected' : '') + '" data-action="pick-courts" data-n="' + n + '">' + n + '</button>';
+      }).join('') + '</div>' +
+      '<div class="modal-actions"><button class="btn" data-action="close-modal">Cancel</button>' +
+      '<button class="btn primary" data-action="apply-courts">Apply</button></div>'
+    );
+  }
+
+  function applyCourts() {
+    var session = activeSession();
+    if (!session) return;
+    var sel = document.querySelector('#courts-picker .court-opt.selected');
+    if (!sel) return;
+    var n = parseInt(sel.getAttribute('data-n'), 10);
+    if (!(n >= 1 && n <= 6)) return;
+    session.courtCount = n;
+    var started = Engine.fillCourts(session, playersById());
+    persist();
+    closeModal();
+    renderPlay();
+    var closing = Engine.activeGames(session).filter(function (g) { return g.court > n; }).length;
+    toast(n + (n === 1 ? ' court' : ' courts') + ' now.' +
+      (started.length ? ' Court ' + started.map(function (g) { return g.court; }).join(' & ') + ': next game is up!' : '') +
+      (closing ? ' ' + closing + (closing === 1 ? ' game finishes' : ' games finish') + ' on a closing court.' : ''));
   }
 
   function showPartners(session) {
@@ -2390,7 +2503,7 @@
       }
       case 'tsetup-all':
       case 'tsetup-none':
-        document.querySelectorAll('.tsetup-player').forEach(function (c) { c.checked = action === 'tsetup-all'; });
+        visibleChecks('.tsetup-player').forEach(function (c) { c.checked = action === 'tsetup-all'; });
         updateTournamentCounts();
         renderTournamentPairs();
         break;
@@ -2410,7 +2523,7 @@
       }
       case 'setup-all':
       case 'setup-none':
-        document.querySelectorAll('.setup-player').forEach(function (c) { c.checked = action === 'setup-all'; });
+        visibleChecks('.setup-player').forEach(function (c) { c.checked = action === 'setup-all'; });
         updateSetupCount();
         renderSetupPairs();
         break;
@@ -2477,6 +2590,8 @@
         break;
       }
       case 'undo-score': undoLastScore(); break;
+      case 'change-courts': { var cs = activeSession(); if (cs) showChangeCourts(cs); break; }
+      case 'apply-courts': applyCourts(); break;
       case 'tsetup-reuse-groups': reuseLastGroups(); break;
       case 'import-data': importData(); break;
       case 'reset-progress': resetProgress(); break;
@@ -2509,6 +2624,7 @@
 
   document.addEventListener('input', function (e) {
     if (e.target.classList && e.target.classList.contains('group-name')) groupNameTyped(e.target);
+    if (e.target.classList && e.target.classList.contains('row-filter')) applyRowFilter(e.target);
   });
 
   document.addEventListener('keydown', function (e) {

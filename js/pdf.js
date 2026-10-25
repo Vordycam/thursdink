@@ -175,7 +175,7 @@
       done.slice().reverse().forEach(function (sess) {
         var games = 0;
         Engine.sessionMatches(sess).forEach(function (m) { if (m.done) games++; });
-        doc.ensure(70);
+        doc.ensure(110);
         // Count and list everyone who played, including anyone who left early.
         doc.text(MARGIN, (sess.tournament ? 'Tournament - ' : '') + fmtDate(sess.startedAt) + '  -  ' +
           Engine.sessionParticipants(sess).length + ' players, ' +
@@ -186,6 +186,22 @@
           }).join(', '), 8, false);
         }
         if (sess.matchBySkill) doc.text(MARGIN, 'Courts were matched by skill level.', 8, false);
+        // The night in numbers, one short line each: the writer does not wrap.
+        var sum = Engine.sessionSummary(sess);
+        if (sum.games) {
+          var nm = function (id) { return byId[id] ? byId[id].name : '?'; };
+          var res = function (m) { return m.teamA.map(nm).join(' & ') + ' ' + m.scoreA + '-' + m.scoreB + ' ' + m.teamB.map(nm).join(' & '); };
+          if (sum.timed) {
+            doc.text(MARGIN, 'Average game ' + Engine.fmtDuration(sum.avg) + '; longest ' + Engine.fmtDuration(sum.longestMs) + ': ' + res(sum.longest), 8, false);
+          }
+          if (sum.closest) {
+            doc.text(MARGIN, 'Closest game: ' + res(sum.closest) +
+              (sum.biggest && sum.biggest !== sum.closest ? '.  Biggest win: ' + res(sum.biggest) : ''), 8, false);
+          }
+          if (sum.climber && byId[sum.climber.id]) {
+            doc.text(MARGIN, 'Climber of the night: ' + nm(sum.climber.id) + ' (+' + sum.climber.change + ')', 8, false);
+          }
+        }
         var sessStats = Engine.computeStats([sess]);
         var times = Engine.playTimes(sess);   // each note then carries the player's average game time
         if (Engine.groupPlay(sess)) {

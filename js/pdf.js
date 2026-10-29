@@ -202,6 +202,11 @@
             doc.text(MARGIN, 'Climber of the night: ' + nm(sum.climber.id) + ' (+' + sum.climber.change + ')', 8, false);
           }
         }
+        if ((sess.levelChanges || []).length) {
+          doc.text(MARGIN, 'Levels updated: ' + sess.levelChanges.map(function (c) {
+            return (byId[c.id] ? byId[c.id].name : '?') + ' ' + c.from + ' -> ' + c.to;
+          }).join(', '), 8, false);
+        }
         var sessStats = Engine.computeStats([sess]);
         var times = Engine.playTimes(sess);   // each note then carries the player's average game time
         if (Engine.groupPlay(sess)) {

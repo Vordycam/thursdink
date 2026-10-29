@@ -1886,3 +1886,136 @@ test('previewNext: null when no court could be filled; carries the division or t
   assert.deepEqual(gp.groups, [0, 1]);
   assert.deepEqual(groupsOf(gp, g), [[0, 0], [1, 1]]);
 });
+
+/* ── levels follow results ────────────────────────────────────────────── */
+
+/* A rating history of `rs`, one point per game, a minute apart, ending now. */
+function history(rs) {
+  return rs.map((r, i) => ({ t: clock - (rs.length - 1 - i) * MIN, r }));
+}
+
+test('levelStatus: null when the rating sits closest to the listed level, or the level is off the scale', () => {
+  const p = { id: 'A', name: 'A', skill: '3.5', rating: 1250, ratingHistory: history([1260, 1250]) };
+  assert.equal(Engine.levelStatus(p), null);
+  p.rating = 1324;   // still nearer 3.5 (1250) than 4.0 (1400)
+  assert.equal(Engine.levelStatus(p), null);
+  const off = { id: 'B', name: 'B', skill: '6.0', rating: 1500, ratingHistory: history([1500]) };
+  assert.equal(Engine.levelStatus(off), null);
+  const top = { id: 'C', name: 'C', skill: '5.5', rating: 3000, ratingHistory: history([2900, 3000]) };
+  assert.equal(Engine.levelStatus(top), null, 'nothing above 5.5');
+  const bottom = { id: 'D', name: 'D', skill: '1.0', rating: 100, ratingHistory: history([200, 100]) };
+  assert.equal(Engine.levelStatus(bottom), null, 'nothing below 1.0');
+  const fresh = { id: 'E', name: 'E', skill: '3.5', rating: 1250 };
+  assert.equal(Engine.levelStatus(fresh), null, 'no history at all');
+});
+
+test('levelStatus: the streak counts games in a row with the rating beyond the listed level; next appears at ten', () => {
+  const nine = [1330, 1335, 1340, 1338, 1345, 1350, 1348, 1355, 1360];
+  const p = { id: 'A', name: 'A', skill: '3.5', rating: 1360, ratingHistory: history(nine) };
+  let st = Engine.levelStatus(p);
+  assert.equal(st.listed, '3.5');
+  assert.equal(st.suggested, '4.0');
+  assert.equal(st.steps, 1);
+  assert.equal(st.streak, 9);
+  assert.equal(st.need, Engine.LEVEL_REVIEW_GAMES);
+  assert.equal(Engine.LEVEL_REVIEW_GAMES, 10);
+  assert.equal(st.next, null, 'nine is not enough');
+  p.ratingHistory = history([1300].concat(nine, [1366]));
+  p.rating = 1366;
+  st = Engine.levelStatus(p);
+  assert.equal(st.streak, 10, 'the 1300 before the run does not count; the run does');
+  assert.equal(st.next, '4.0');
+  // one dip back under the midpoint and the run starts again
+  p.ratingHistory = history([1340, 1350, 1360, 1320, 1340, 1350, 1360, 1370]);
+  p.rating = 1370;
+  st = Engine.levelStatus(p);
+  assert.equal(st.streak, 4);
+  assert.equal(st.next, null);
+});
+
+test('levelStatus: downwards too, and only one step at a time', () => {
+  const low = [1300, 1290, 1280, 1270, 1260, 1250, 1240, 1230, 1220, 1210];
+  const p = { id: 'A', name: 'A', skill: '4.0', rating: 1210, ratingHistory: history(low) };
+  const st = Engine.levelStatus(p);
+  assert.equal(st.steps, -1);
+  assert.equal(st.streak, 10);
+  assert.equal(st.next, '3.5');
+  // listed 3.0 but playing like a 4.5: the step is to 3.5, not 4.5
+  const high = [1500, 1510, 1520, 1530, 1540, 1550, 1560, 1570, 1580, 1590];
+  const q = { id: 'B', name: 'B', skill: '3.0', rating: 1590, ratingHistory: history(high) };
+  const sq = Engine.levelStatus(q);
+  assert.equal(sq.suggested, '4.5');
+  assert.equal(sq.steps, 3);
+  assert.equal(sq.next, '3.5');
+});
+
+test('levelStatus: games before the level was last set do not count', () => {
+  const rs = [1340, 1350, 1360, 1370, 1380, 1390, 1400, 1410, 1420, 1430, 1440, 1450];
+  const p = { id: 'A', name: 'A', skill: '3.5', rating: 1450, ratingHistory: history(rs) };
+  assert.equal(Engine.levelStatus(p).streak, 12);
+  p.levelChangedAt = clock - 5 * MIN;   // on the 7th point exactly: only the five strictly after it count
+  const st = Engine.levelStatus(p);
+  assert.equal(st.streak, 5);
+  assert.equal(st.next, null);
+});
+
+test('reviewLevels moves the levels that are due, records them, and does not move them twice', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  byId.A.ratingHistory = history([1330, 1335, 1340, 1345, 1350, 1355, 1360, 1365, 1370, 1375]);
+  byId.A.rating = 1375;
+  byId.B.ratingHistory = history([1330, 1335, 1340, 1345, 1350, 1355, 1360, 1365, 1370]);
+  byId.B.rating = 1370;
+  byId.C.ratingHistory = history([1170, 1168, 1165, 1163, 1160, 1158, 1156, 1154, 1152, 1150]);
+  byId.C.rating = 1150;   // nearer 3.0 (1100) than 3.5 (1250): under the 1175 midpoint throughout
+  const before = JSON.stringify(byId.D);
+  const changes = Engine.reviewLevels(['A', 'B', 'C', 'D', 'nobody'], byId);
+  assert.deepEqual(changes, [
+    { id: 'A', from: '3.5', to: '4.0', rating: 1375 },
+    { id: 'C', from: '3.5', to: '3.0', rating: 1150 },
+  ]);
+  assert.equal(byId.A.skill, '4.0');
+  assert.equal(byId.A.rating, 1375, 'the rating itself is untouched');
+  assert.equal(byId.A.levelChangedAt, clock);
+  assert.deepEqual(byId.A.levelHistory, [{ t: clock, from: '3.5', to: '4.0', by: 'auto', rating: 1375 }]);
+  assert.equal(byId.B.skill, '3.5', 'nine games: not yet');
+  assert.equal(byId.B.levelHistory, undefined);
+  assert.equal(byId.C.skill, '3.0');
+  assert.equal(JSON.stringify(byId.D), before, 'a player at their level is left exactly as they were');
+  assert.deepEqual(Engine.reviewLevels(['A', 'C'], byId), [], 'nothing moves twice');
+  assert.equal(Engine.levelStatus(byId.A), null, '1375 sits closest to the new 4.0');
+  assert.equal(Engine.levelStatus(byId.C), null, '1150 sits closest to the new 3.0');
+  // ten more games above the 4.0/4.5 midpoint and A moves again - one step
+  advance(20 * MIN);
+  byId.A.ratingHistory = byId.A.ratingHistory.concat(history([1480, 1485, 1490, 1495, 1500, 1505, 1510, 1515, 1520, 1525]));
+  byId.A.rating = 1525;
+  assert.deepEqual(Engine.reviewLevels(['A'], byId), [{ id: 'A', from: '4.0', to: '4.5', rating: 1525 }]);
+  assert.equal(byId.A.levelHistory.length, 2);
+  assert.equal(byId.A.skill, '4.5');
+});
+
+test('changeLevel from Edit records the host and starts the count over', () => {
+  const p = { id: 'A', name: 'A', skill: '3.5', rating: 1380, ratingHistory: history([1340, 1350, 1360, 1370, 1380]) };
+  assert.equal(Engine.levelStatus(p).streak, 5);
+  Engine.changeLevel(p, '4.0', 'host');
+  assert.equal(p.skill, '4.0');
+  assert.deepEqual(p.levelHistory, [{ t: clock, from: '3.5', to: '4.0', by: 'host', rating: 1380 }]);
+  assert.equal(Engine.levelStatus(p), null, '1380 sits closest to 4.0 now');
+  Engine.changeLevel(p, '3.0', 'host');
+  const st = Engine.levelStatus(p);
+  assert.equal(st.suggested, '4.0');
+  assert.equal(st.streak, 0, 'games before the edit do not count');
+  assert.equal(p.levelHistory.length, 2);
+});
+
+test('sessionRecap lists the levels that moved when the night ended, and nothing when none did', () => {
+  const byId = players(['A', 'B', 'C', 'D']);
+  const sess = session(['A', 'B', 'C', 'D'], 1);
+  played(sess, ['A', 'B'], ['C', 'D'], 11, 5);
+  sess.status = 'done';
+  const plain = Engine.sessionRecap(sess, byId, 'Thu');
+  assert.ok(plain.indexOf('Levels updated') < 0);
+  sess.levelChanges = [{ id: 'A', from: '3.5', to: '4.0', rating: 1370 }, { id: 'D', from: '3.5', to: '3.0', rating: 1150 }];
+  const recap = Engine.sessionRecap(sess, byId, 'Thu');
+  assert.ok(recap.indexOf('Levels updated: A 3.5 -> 4.0, D 3.5 -> 3.0') >= 0, recap);
+  assert.equal(recap.replace('Levels updated: A 3.5 -> 4.0, D 3.5 -> 3.0\n', ''), plain, 'one line more, nothing else changes');
+});

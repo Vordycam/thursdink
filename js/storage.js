@@ -7,10 +7,13 @@
   function defaultData() {
     return {
       version: 1,
-      players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived, photo?: small JPEG data URL}
+      players: [],   // {id, name, skill, rating, ratingHistory:[{t,r}], archived, photo?: small JPEG data URL,
+                     //  levelChangedAt?, levelHistory?: [{t, from, to, by: 'auto'|'host', rating}]}
       sessions: []   // {id, startedAt, endedAt, courtCount, playerIds, playerMeta, pairs, games, status,
-                     //  matchBySkill?, tournament?, mixedPairs?, groups?: {names: [a, b], of: {playerId: 0|1}}}
+                     //  matchBySkill?, tournament?, mixedPairs?, groups?: {names: [a, b], of: {playerId: 0|1}},
+                     //  levelChanges?: [{id, from, to, rating}] - levels moved when the night ended}
                      // a game carries startedAt; a tournament game also its division as category, or its groups
+                     // autoLevels: false when the host has turned off levels following results (on when absent)
     };
   }
 

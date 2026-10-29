@@ -69,6 +69,18 @@
     return null;
   }
 
+  /* Levels follow results unless the host has turned that off on the
+     Players tab: a listed level then changes only from Edit. */
+  function autoLevels() {
+    return DB.autoLevels !== false;
+  }
+
+  function setAutoLevels(on) {
+    if (on) delete DB.autoLevels; else DB.autoLevels = false;
+    persist();
+    toast(on ? 'Levels follow results again from the next night that ends.' : 'Levels now change only from Edit.');
+  }
+
   /* For the actions that refuse while something is running: which tab it is on. */
   function endFirstMessage() {
     var s = activeSession();
@@ -1310,7 +1322,13 @@
       'Levels: ' + categoriesLine() + '.</p>' +
       '<div class="setup-actions"><button class="btn small" data-action="add-several">Add several at once</button></div></div>' +
       '<div class="card"><h2>Roster (' + roster.length + ')</h2>' + rosterFilterHtml(roster.length) +
-      (rows || '<p class="muted">No players yet.</p>') + archivedHtml + '</div>';
+      (rows || '<p class="muted">No players yet.</p>') + archivedHtml + '</div>' +
+      '<div class="card"><h2>Levels</h2>' +
+      '<label class="check-row"><input type="checkbox" id="auto-levels"' + (autoLevels() ? ' checked' : '') + '> ' +
+      '<span class="check-name">Levels follow results</span></label>' +
+      '<p class="muted small-note">When a night ends, everyone who played is reviewed: a player whose rating has sat closer to ' +
+      'another level after each of their last ' + Engine.LEVEL_REVIEW_GAMES + ' games moves one step that way, up or down. ' +
+      'The change is listed with the night\'s results and in their profile. Off, levels change only from Edit.</p></div>';
   }
 
   /* ---------- Stats view ---------- */
@@ -1491,6 +1509,7 @@
       (prog.rows.length ? ' (' + signed(change) + ' since their first game)' : '') + '</p></div></div>' +
       (p.note ? '<p class="player-note">' + esc(p.note) + '</p>' : '') +
       levelHintHtml(p) +
+      levelHistoryHtml(p) +
       sparkline(p.ratingHistory) +
       '<div class="stat-grid">' +
       '<div class="stat-box"><div class="stat-num">' + s.games + '</div><div class="stat-lbl">Games</div></div>' +
@@ -1509,8 +1528,11 @@
   }
 
   /* When a player's rating has drifted two or more levels from the level
-     they are listed at, say so; the host decides, from Edit. */
+     they are listed at, say so; the host decides, from Edit. With levels
+     following results, the note instead says how close their results are
+     to moving the level. */
   function levelHintHtml(p) {
+    if (autoLevels()) return levelStatusHtml(p);
     var drift = Engine.levelDrift(p);
     if (!drift || Math.abs(drift.steps) < 2) return '';
     var session = activeSession();
@@ -1519,6 +1541,29 @@
       'If that matches what you see on court, update the level from Edit' +
       (session && session.tournament && !Engine.groupPlay(session) ? '; in a tournament by division that moves them from their next game' : '') +
       '.</p>';
+  }
+
+  function levelStatusHtml(p) {
+    var st = Engine.levelStatus(p);
+    if (!st) return '';
+    var up = st.steps > 0;
+    var step = Engine.SKILL_LEVELS[Engine.SKILL_LEVELS.indexOf(p.skill) + (up ? 1 : -1)];
+    return '<p class="muted small-note level-hint">Their rating of ' + p.rating + ' sits closest to a ' + esc(st.suggested) +
+      ' level, ' + (up ? 'above' : 'below') + ' the listed ' + esc(p.skill) +
+      (st.streak ? ', as it has after each of their last ' + (st.streak === 1 ? 'game' : st.streak + ' games') : '') + '. ' +
+      (st.next
+        ? 'Their level moves to ' + esc(st.next) + ' when the next night they play ends.'
+        : 'After ' + st.need + ' games in a row it moves ' + (up ? 'up' : 'down') + ' a step, to ' + esc(step) + ', when that night ends.') +
+      '</p>';
+  }
+
+  /* The last few times a player's level changed, and what moved it. */
+  function levelHistoryHtml(p) {
+    var h = (p.levelHistory || []).slice(-3);
+    if (!h.length) return '';
+    return '<p class="muted small-note">Level ' + h.map(function (c) {
+      return esc(c.from) + ' &rarr; ' + esc(c.to) + ' on ' + fmtDate(c.t) + (c.by === 'auto' ? ' (from results)' : '');
+    }).join('; ') + '.</p>';
   }
 
   /* A player's last five results, oldest first. Nothing until they have
@@ -1576,6 +1621,7 @@
       '<p class="muted">' + Engine.sessionParticipants(sess).length + ' players &middot; ' + countDoneGames(sess) + ' games' +
       (sess.status === 'active' ? ' &middot; in progress' : '') + '</p>' +
       nightNumbersHtml(sess, byId) +
+      levelChangesHtml(sess, byId) +
       (partners ? '<p class="muted small-note">Fixed partners: ' + esc(partners) + '</p>' : '') +
       (sess.matchBySkill ? '<p class="muted small-note">Courts were matched by skill level.</p>' : '') +
       (groups ? '<p class="muted small-note">Two groups: every game was two from ' + esc(Engine.groupLabel(sess, 0)) +
@@ -1649,6 +1695,15 @@
       rows.push('Climber of the night: ' + esc(byId[sum.climber.id].name) + ' <span class="delta-up">+' + sum.climber.change + '</span>');
     }
     return '<ul class="muted small-note night-numbers">' + rows.map(function (r) { return '<li>' + r + '</li>'; }).join('') + '</ul>';
+  }
+
+  /* The levels that moved when the night ended, if any. */
+  function levelChangesHtml(sess, byId) {
+    var changes = sess.levelChanges || [];
+    if (!changes.length) return '';
+    return '<p class="muted small-note level-hint">Levels updated: ' + changes.map(function (c) {
+      return esc(byId[c.id] ? byId[c.id].name : '?') + ' ' + esc(c.from) + ' &rarr; ' + esc(c.to);
+    }).join(', ') + '.</p>';
   }
 
   /* The recap as text: handed to the phone's share sheet when there is
@@ -2397,12 +2452,17 @@
     session.games = (session.games || []).filter(function (g) { return g.done; });
     session.status = 'done';
     session.endedAt = Date.now();
+    // Levels follow results: everyone who played tonight is reviewed now.
+    var moved = autoLevels() ? Engine.reviewLevels(Engine.sessionParticipants(session), playersById()) : [];
+    if (moved.length) session.levelChanges = (session.levelChanges || []).concat(moved);
     persist();
     releaseScreen();
     renderPlay();
+    if (moved.length) renderPlayers();
     renderStats();
     showSessionDetail(session.id);
-    toast((session.tournament ? 'Tournament saved.' : 'Session saved.') + backupNudge());
+    toast((session.tournament ? 'Tournament saved.' : 'Session saved.') +
+      (moved.length ? ' ' + moved.length + (moved.length === 1 ? ' level' : ' levels') + ' updated.' : '') + backupNudge());
   }
 
   function savePlayer(playerId) {
@@ -2424,8 +2484,8 @@
     var moved = '';
     if (skill !== p.skill) {
       var fromDivision = Engine.skillCategory(p.skill);
-      p.skill = skill;
       if (!hadGames) p.rating = Engine.initialRating(skill);
+      Engine.changeLevel(p, skill, 'host');
       moved = tournamentLevelChange(playerId, fromDivision, byId);
     }
     var prevPhoto = p.photo, newPhoto = pendingPhoto;
@@ -2732,6 +2792,7 @@
       if (dropped) toast(dropped + (dropped === 1 ? ' pair' : ' pairs') + ' of different levels removed.');
     }
     if (e.target.id === 'edit-player-photo') photoChosen(e.target);
+    if (e.target.id === 'auto-levels') setAutoLevels(e.target.checked);
   });
 
   document.addEventListener('input', function (e) {

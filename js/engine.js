@@ -12,7 +12,9 @@
    in the higher partner's division. The other tournament format is two
    groups: every game is two players from one group against two from the
    other, and the groups' wins are the score. Every game carries a clock, so
-   a player's average time on court can be reported. */
+   a player's average time on court can be reported. Levels follow results:
+   when a night ends, a player whose rating has settled at another level
+   moves one step that way (levelStatus, reviewLevels). */
 (function () {
   'use strict';
 
@@ -256,6 +258,72 @@
     if (from < 0) return null;
     var suggested = suggestedSkill(player.rating);
     return { suggested: suggested, steps: SKILL_LEVELS.indexOf(suggested) - from };
+  }
+
+  /*
+   * Levels follow results. A player's listed level is reviewed when a
+   * night they played ends: if their rating has sat closer to a level on
+   * the far side of the listed one - above it or below it - after each of
+   * their last LEVEL_REVIEW_GAMES scored games, and every one of those
+   * games came after the level was last set, the listed level moves one
+   * step that way. One step at a time, and only on a run of games, so a
+   * hot night or a tough one moves nobody; a run of them does. A level the
+   * host sets from Edit counts as a change and starts the count over. The
+   * rating itself is untouched: it moves game by game, as it always has.
+   */
+  var LEVEL_REVIEW_GAMES = 10;
+
+  /* Where a player stands against their listed level: the level their
+     rating sits closest to, how many steps away it is, and `streak`, the
+     games in a row (latest first, since the level was last set) after
+     which the rating sat beyond the listed level on that side. `next` is
+     the level they move to once the streak reaches `need`, null until
+     then. Null when the rating sits closest to the listed level itself,
+     or the level is off the scale. */
+  function levelStatus(player) {
+    var drift = levelDrift(player);
+    if (!drift || !drift.steps) return null;
+    var dir = drift.steps > 0 ? 1 : -1;
+    var from = SKILL_LEVELS.indexOf(player.skill);
+    var since = player.levelChangedAt || 0;
+    var h = player.ratingHistory || [];
+    var streak = 0;
+    for (var i = h.length - 1; i >= 0; i--) {
+      if (since && !(h[i].t > since)) break;
+      var at = SKILL_LEVELS.indexOf(suggestedSkill(h[i].r));
+      if (dir > 0 ? at <= from : at >= from) break;
+      streak++;
+    }
+    return {
+      listed: player.skill, suggested: drift.suggested, steps: drift.steps,
+      streak: streak, need: LEVEL_REVIEW_GAMES,
+      next: streak >= LEVEL_REVIEW_GAMES ? SKILL_LEVELS[from + dir] : null
+    };
+  }
+
+  /* Set a player's level, keeping a record of what moved it - 'auto' for
+     a review, 'host' for an edit - and from when the next review counts. */
+  function changeLevel(player, to, by) {
+    var from = player.skill;
+    player.skill = to;
+    player.levelChangedAt = Date.now();
+    player.levelHistory = player.levelHistory || [];
+    player.levelHistory.push({ t: player.levelChangedAt, from: from, to: to, by: by, rating: player.rating });
+  }
+
+  /* Review the given players and move every level that is due. Returns
+     the changes made, in the order given: {id, from, to, rating}. */
+  function reviewLevels(ids, playersById) {
+    var changes = [];
+    (ids || []).forEach(function (id) {
+      var p = playersById[id];
+      if (!p) return;
+      var st = levelStatus(p);
+      if (!st || !st.next) return;
+      changes.push({ id: id, from: p.skill, to: st.next, rating: p.rating });
+      changeLevel(p, st.next, 'auto');
+    });
+    return changes;
   }
 
   function pairKey(a, b) {
@@ -1248,6 +1316,11 @@
     if (sum.closest) lines.push('Closest game: ' + result(sum.closest));
     if (sum.biggest && sum.biggest !== sum.closest) lines.push('Biggest win: ' + result(sum.biggest));
     if (sum.climber) lines.push('Climber of the night: ' + name(sum.climber.id) + ' (+' + sum.climber.change + ')');
+    if ((session.levelChanges || []).length) {
+      lines.push('Levels updated: ' + session.levelChanges.map(function (c) {
+        return name(c.id) + ' ' + c.from + ' -> ' + c.to;
+      }).join(', '));
+    }
 
     var stats = computeStats([session]);
     function board(title, ids) {
@@ -1425,6 +1498,9 @@
     initialRating: initialRating,
     suggestedSkill: suggestedSkill,
     levelDrift: levelDrift,
+    levelStatus: levelStatus,
+    changeLevel: changeLevel,
+    reviewLevels: reviewLevels,
     parseRoster: parseRoster,
     sessionMatches: sessionMatches,
     activeGames: activeGames,
@@ -1478,6 +1554,7 @@
     skillCategory: skillCategory,
     GAME_TARGET: GAME_TARGET,
     TIE_WINDOW_MS: TIE_WINDOW_MS,
+    LEVEL_REVIEW_GAMES: LEVEL_REVIEW_GAMES,
     SKILL_LEVELS: SKILL_LEVELS,
     SKILL_CATEGORIES: SKILL_CATEGORIES
   };
